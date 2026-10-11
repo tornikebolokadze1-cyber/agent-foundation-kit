@@ -31,6 +31,7 @@ import json
 import os
 import re
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import unquote
@@ -48,7 +49,12 @@ for _stream in (sys.stdout, sys.stderr):
 # from outside, which may link however it likes. Foreign files still exist as
 # nodes, so links TO them resolve.
 FOREIGN_PREFIXES = ("research/",)
-SKIP_DIRS = {"memory/graph", "node_modules", ".venv", "venv", "__pycache__", "dist", "build"}
+SKIP_DIRS = {"memory/graph"}
+# Dependency and build folders are skipped at any depth — a site in site/ has its own node_modules (D-044).
+SKIP_NAMES = {"node_modules", ".venv", "venv", "__pycache__", "dist", "build"}
+# A folder below the root that holds its own code project is the product's: its Markdown (a site's posts, a
+# package's README) follows the product's rules, not the vault's, so it is foreign — a node, never checked.
+CODE_MARKERS = ("package.json", "pyproject.toml")
 LINKABLE_SUFFIXES = {".md", ".html", ".json", ".jsonl", ".py", ".toml", ".txt", ".csv", ".png", ".jpg", ".svg", ".pdf"}
 
 # ── Document types ───────────────────────────────────────────────────────────
@@ -61,6 +67,7 @@ PATH_TYPES: list[tuple[str, str]] = [
     ("docs/plans/PLAN-*.md", "plan"),
     ("docs/adr/ADR-*.md", "adr"),
     ("docs/domain/*.md", "domain"),
+    ("docs/guides/*.md", "guide"),
     ("memory/episodes/EP-*.md", "episode"),
 ]
 
@@ -101,6 +108,9 @@ PENDING_STATUSES = {"intent": {"draft"}, "spec": {"draft", "review"}, "plan": {"
 # An ADR's `scope`: none or "project" = this project's own decision; "engine" = the engine's own rule, which the
 # engine's author decides and which never holds up a project's stages (ADR-0011).
 SCOPES = ("engine", "project")
+# intent.md's `kind`: what is being built. Each kind has its guide, docs/guides/<kind>.md — interview questions,
+# stack options with their commands, the first version's scope and how to show the result (D-044).
+KINDS = ("website", "game", "agent", "automation", "other")
 # Relation fields: which type each one must point to (None = any).
 RELATION_TYPES = {"intent": "intent", "spec": "spec", "supersedes": None, "superseded_by": None,
                   "adrs": "adr", "depends_on": None, "related": None, "source": None}
@@ -154,6 +164,10 @@ class Node:
     @property
     def scope(self) -> str:
         return str((self.fm or {}).get("scope") or "")
+
+    @property
+    def kind(self) -> str:
+        return str((self.fm or {}).get("kind") or "")
 
 
 @dataclass
@@ -346,10 +360,23 @@ def default_root() -> Path:
 
 
 def _is_skipped_dir(rel_dir: str) -> bool:
-    parts = rel_dir.split("/")
-    if any(p.startswith(".") for p in parts if p):
+    parts = [p for p in rel_dir.split("/") if p]
+    if any(p.startswith(".") or p in SKIP_NAMES for p in parts):
         return True
     return any(rel_dir == s or rel_dir.startswith(s + "/") for s in SKIP_DIRS)
+
+
+def code_folders(root: Path) -> tuple[str, ...]:
+    """Folders below the root that hold their own code project (CODE_MARKERS) — the product's, foreign here."""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = Path(dirpath).relative_to(root).as_posix()
+        rel_dir = "" if rel_dir == "." else rel_dir
+        dirnames[:] = [d for d in dirnames if not _is_skipped_dir(f"{rel_dir}/{d}".lstrip("/"))]
+        if rel_dir and any(m in filenames for m in CODE_MARKERS):
+            out.append(rel_dir + "/")
+            dirnames[:] = []  # everything below belongs to that project
+    return tuple(out)
 
 
 def iter_vault_files(root: Path):
@@ -410,8 +437,9 @@ def _frontmatter_links(fm: dict, text: str) -> list[Link]:
 def load(root: Path | None = None) -> Graph:
     root = (root or default_root()).resolve()
     nodes: dict[str, Node] = {}
+    foreign = FOREIGN_PREFIXES + code_folders(root)
     for rel in iter_vault_files(root):
-        node = Node(path=rel, foreign=rel.startswith(FOREIGN_PREFIXES))
+        node = Node(path=rel, foreign=rel.startswith(foreign))
         if rel.endswith(".md"):
             try:
                 text = (root / rel).read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
@@ -545,6 +573,9 @@ def check(g: Graph) -> list[Issue]:
             issues.append(Issue("error", "SCOPE", n.path, 1,
                                 f"scope {n.scope!r} is not valid for an adr (allowed: {', '.join(SCOPES)}; "
                                 "none = project) — an engine ADR stays out of the project's stages (ADR-0011)"))
+        if typ == "intent" and n.kind and n.kind not in KINDS:
+            issues.append(Issue("error", "KIND", n.path, 1, f"kind {n.kind!r} is not a project type (allowed: "
+                                f"{', '.join(KINDS)}) — the stage could not name its guide in docs/guides/"))
         if fm.get("id"):
             ids.setdefault(str(fm["id"]), []).append(n.path)
 
@@ -753,6 +784,32 @@ class Stage:
         ])
 
 
+def guide_note(g: Graph, section: str) -> str:
+    """Where the project type's guide covers this step — empty while the type or its guide is unknown (D-044)."""
+    intent = g.nodes.get("intent.md")
+    kind = intent.kind if intent is not None and intent.kind in KINDS else ""
+    path = f"docs/guides/{kind}.md"
+    return f"; სახელმძღვანელო — `{path}` {section}" if kind and (g.root / path).is_file() else ""
+
+
+def code_checks_off(root: Path) -> bool:
+    """True when gates.toml has both level-1 code checks (`lint`, `unit`) and both are switched off. A missing or
+    unreadable file is not "off": the stage then says nothing rather than guess."""
+    try:
+        data = tomllib.loads((root / "tools/gates/gates.toml").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    gates = {g.get("id"): g for g in data.get("gate", []) if isinstance(g, dict)}
+    return all(i in gates and not gates[i].get("enabled", False) for i in ("lint", "unit"))
+
+
+NEEDS_KIND = ("ჯერ ჩაწერე intent.md-ის frontmatter-ში პროექტის ტიპი — `kind:` website / game / agent / automation / "
+              "other (ცხრილი: `docs/guides/other.md`) — და კითხვები მისი სახელმძღვანელოს §1-დან აიღე; ")
+CHECKS_FIRST = ("ჯერ ჩართე კოდის შემოწმებები: `tools/gates/gates.toml`-ში `lint` და `unit` სტეკის ADR-ის ბრძანებებით, "
+                "მხოლოდ პროექტის საკუთარ კოდზე (არა ძრავის `tools/`-ზე) — ფაილი დაცულია, ამიტომ ადამიანის „კი“ სჭირდება; "
+                "მერე ")
+
+
 def _review(number: int, doc: Node, step: str, fix: str) -> Stage:
     """A document waits for the person: they read it and approve it, or say what to change."""
     cmd = approve_hint(doc)
@@ -770,19 +827,21 @@ def project_stage(g: Graph) -> Stage:
             return Stage(1, short="დაწერე შენი იდეა", step="იდეა ჯერ არ არის ჩაწერილი",
                          person="დაწერე შენი იდეა ჩვეულებრივი სიტყვებით: რა გინდა შექმნა და ვისთვის",
                          agent="როცა ადამიანი იდეას დაწერს — `/intent`: ჩაწერე ის intent.md-ის §1-ში მისივე სიტყვებით "
-                               "და დაიწყე ინტერვიუ, ერთი კითხვა ერთ ჯერზე. setup-ს ნუ სთხოვ — ძრავა უკვე აწყობილია",
+                               "და frontmatter-ში ტიპი (`kind:` website / game / agent / automation / other), მერე ინტერვიუ, "
+                               "ერთი კითხვა ერთ ჯერზე, `docs/guides/<kind>.md` §1-ით. setup-ს ნუ სთხოვ — ძრავა უკვე აწყობილია",
                          doc="intent.md")
         return Stage(1, short="ინტერვიუ", step="ინტერვიუ — განზრახვა იწერება",
                      person="უპასუხე კითხვებს; როცა intent.md შენს აზრს სწორად ასახავს — `/approve intent`",
-                     agent="გააგრძელე `/intent`-ის ინტერვიუ (§7-ის ღია კითხვები); როცა ღია კითხვა აღარ დარჩება, მოკლედ "
-                           "აჩვენე, რა ჩაიწერა, და შესთავაზე `/approve intent`",
+                     agent=("" if intent.kind in KINDS else NEEDS_KIND)
+                     + "გააგრძელე `/intent`-ის ინტერვიუ (§7-ის ღია კითხვები); როცა ღია კითხვა აღარ დარჩება, მოკლედ "
+                       "აჩვენე, რა ჩაიწერა, და შესთავაზე `/approve intent`" + guide_note(g, "§1 — კითხვები"),
                      command="/approve intent", doc="intent.md")
     specs = sorted((n for n in g.nodes.values() if n.type == "spec" and not n.foreign and n.status != "superseded"),
                    key=lambda n: n.id)
     if not specs:
         return Stage(2, short="აგენტი წერს სპეციფიკაციას", step="განზრახვა დამტკიცებულია — სპეციფიკაცია ჯერ არ არის",
                      person="დაელოდე — აგენტი წერს სპეციფიკაციას: რა უნდა შეეძლოს შედეგს, შემოწმებადი კრიტერიუმებით",
-                     agent="დაწერე პირველი სპეციფიკაცია: `/spec`")
+                     agent="დაწერე პირველი სპეციფიკაცია: `/spec`" + guide_note(g, "§3 — პირველი ვერსიის ფარგლები"))
     spec = specs[-1]
     if spec.status != "approved":
         return _review(2, spec, f"{spec.id} შენს გადახედვას ელოდება", "`/spec`; წარდგენამდე — spec-reviewer")
@@ -795,7 +854,8 @@ def project_stage(g: Graph) -> Stage:
                      step=f"{spec.id} დამტკიცებულია — ჯერ არ არის გადაწყვეტილი, რით აშენდეს",
                      person="აგენტი შემოგთავაზებს, რით აშენდეს (ტექნოლოგია, ჰოსტინგი) — აირჩიე",
                      agent="შესთავაზე 2–3 ვარიანტი რეკომენდაციით; არჩეული ჩაწერე `/adr`-ით (`scope`-ის გარეშე — ეს "
-                           "პროექტის გადაწყვეტილებაა)")
+                           "პროექტის გადაწყვეტილებაა); ADR-ში ჩაწერე ხუთი ბრძანება — install · run · lint · test · show"
+                           + guide_note(g, "§2 — ვარიანტები და მათი ბრძანებები"))
     plans = sorted((n for n in g.nodes.values() if n.type == "plan" and not n.foreign
                     and any(t.path == spec.path for t in _rel_targets(g, n, "spec"))), key=lambda n: n.id)
     if not plans:
@@ -808,12 +868,13 @@ def project_stage(g: Graph) -> Stage:
     if plan.status != "done":
         return Stage(4, short=f"{plan.id} მიმდინარეობს", step=f"{plan.id} მიმდინარეობს — აგენტი ამოცანა-ამოცანა აშენებს",
                      person="დაელოდე — აგენტი აშენებს და შედეგს გაჩვენებს",
-                     agent=f"შეასრულე {plan.id} ამოცანა-ამოცანა (`/feature-plan`, ნაწილი B): ტესტი, კოდი, gate-ები, "
-                           "commit; ბოლოს აჩვენე შედეგი", doc=plan.path)
+                     agent=(CHECKS_FIRST if code_checks_off(g.root) else "")
+                     + f"შეასრულე {plan.id} ამოცანა-ამოცანა (`/feature-plan`, ნაწილი B): ტესტი, კოდი, gate-ები, commit; "
+                       "ბოლოს აჩვენე შედეგი", doc=plan.path)
     return Stage(5, short="ნახე შედეგი", step=f"{plan.id} დასრულებულია",
                  person="ნახე შედეგი; ახალი იდეა ან ცვლილება — უბრალოდ დაწერე",
                  agent="აჩვენე შედეგი ცოცხლად (სად გახსნას, რა ნახოს, რა სცადოს); ახალი ფუნქცია ან ცვლილება — ახალი "
-                       "`/spec`", doc=plan.path)
+                       "`/spec`" + guide_note(g, "§4 — როგორ აჩვენო"), doc=plan.path)
 
 
 def to_json(g: Graph) -> dict:

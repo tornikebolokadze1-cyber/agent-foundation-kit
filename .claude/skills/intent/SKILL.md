@@ -16,7 +16,9 @@ argument-hint: "[what changed, or the owner's new answers]"
 3. **The idea first (ADR-0011).** If §1 still holds only the template's `_…_` line and the person has just
    described what they want to build, write it into §1 at once — their own words, spelling lightly corrected,
    source **მფლობელი** with the date — before the first question. Never ask for setup, a README step or an
-   approval of the engine's own ADRs.
+   approval of the engine's own ADRs. Write the project's type into the frontmatter — `kind:` website / game /
+   agent / automation / other (the table in `docs/guides/other.md` decides a mixed idea) — and take the
+   interview's questions from that type's guide, `docs/guides/<kind>.md` §1.
 4. **Interview when information is missing** — ONE question at a time, in Georgian, with 2–3 concrete
    options and your recommendation. Start from the open questions in §7.
 5. **Keep the fixed structure** (§1 ხედვა … §8 წყაროები + ცვლილებების ისტორია). Goals keep stable IDs

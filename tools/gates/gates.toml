@@ -111,24 +111,28 @@ pre_commit = true
 stop = false
 what = "tools/gates/drill.py: every guard, hook and gate is broken on purpose and must catch it"
 
-# ── Level 1 — code quality (switched on together with the stack ADR) ──────────
+# ── Level 1 — code quality ─────────────────────────────────────────────────────
+# Switched on at the start of stage 4, with the person's yes, using the commands the stack ADR records — the
+# project type's guide (docs/guides/<kind>.md §2) lists them per stack. Point them at the project's own code
+# (e.g. `src`, `site`), never at the engine's tools/; `unit` goes on with the first test — an empty run proves nothing.
+# A Python stack runs from the project's own virtual environment (.venv/Scripts/python), never the global Python.
 [[gate]]
 id = "lint"
 level = 1
 enabled = false
-cmd = ["ruff", "check", "."]
+cmd = [".venv/Scripts/python", "-m", "ruff", "check", "src"]
 pre_commit = true
-reason = "application code does not exist yet; ruff is not installed (needs the owner's OK)"
-what = "ruff: lint errors are failures"
+reason = "no project code yet — the stack ADR names the linter and its command (e.g. `npm run lint` for a Node stack)"
+what = "the stack's linter: lint errors are failures"
 
 [[gate]]
 id = "unit"
 level = 1
 enabled = false
-cmd = ["py", "-3.12", "-m", "pytest", "-q"]
+cmd = [".venv/Scripts/python", "-m", "pytest", "-q"]
 pre_commit = true
-reason = "no tests/ yet — the first plan that writes code switches this on"
-what = "pytest: every unit test passes"
+reason = "no tests yet — switched on together with the first test (e.g. `npm test` for a Node stack)"
+what = "the stack's tests: every unit test passes"
 
 # ── Level 2 — behaviour evals (switched on when the agent answers questions) ──
 [[gate]]

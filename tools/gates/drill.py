@@ -309,13 +309,14 @@ def g_graph_stage(tmp: Path, vault: Path) -> None:
            "seeded: `pending` lists an engine ADR apart from the project's documents", out[:240])
     expect(rc == 0 and "/approve intent" not in out, "seeded: `pending` does not offer an intent whose §1 is still the "
            "template", out[:240])
+    g_graph_kind(tmp, vault)
     v = fresh(tmp, "stage-bad-id", vault)
     write(v / "docs/specs/SPEC-0002-0001-odd.md", FM.format(
         body='id: SPEC-0002-0001\ntype: spec\ntitle: Odd\nstatus: draft\ncreated: 2026-01-01\nupdated: 2026-01-01\n'
              'intent: "[[intent]]"\n') + "body\n")
     rc, out, _ = py("tools/context_graph.py", "--root", str(v), "pending")
     odd = next((ln for ln in out.splitlines() if "SPEC-0002-0001" in ln), "")
-    expect(odd and "/approve spec 0001" not in odd and "id არასწორია" in odd, "seeded: a spec whose id is SPEC-0002-0001 "
+    expect(bool(odd) and "/approve spec 0001" not in odd and "id არასწორია" in odd, "seeded: a spec whose id is SPEC-0002-0001 "
            "is never offered as `/approve spec 0001` (that approves another document)", out[:300])
     v = fresh(tmp, "stage-bad-bytes", vault)
     (v / intent).write_bytes((v / intent).read_bytes().replace(b"# Intent\n", b"# Intent\n\n## 1. \xe1\xe3\n\nsome \x93idea\x94\n"))
@@ -327,6 +328,66 @@ def g_graph_stage(tmp: Path, vault: Path) -> None:
     rc, out, _ = graph_check(v)
     expect(rc == 1 and "SCOPE" in out, "seeded: an ADR with a misspelt scope → SCOPE (it would silently join the "
            "project's stages)", f"rc={rc} out={out[-200:]!r}")
+
+
+def g_graph_kind(tmp: Path, vault: Path) -> None:
+    """The project's type (intent.md `kind`) and its guide; code checks before building; product folders (D-044)."""
+    intent, plan = "intent.md", "docs/plans/PLAN-0001-demo.md"
+    kind = (intent, "type: intent\n", "type: intent\nkind: website\n")
+    built = [(intent, "status: draft", "status: accepted"), ("docs/specs/SPEC-0001-demo.md", "status: draft", "status: approved"),
+             ("docs/adr/ADR-0001-demo.md", "status: proposed", "status: accepted")]
+
+    def stage(v: Path) -> str:
+        return py("tools/context_graph.py", "--root", str(v), "stage")[1]
+
+    def guide(v: Path) -> None:
+        write(v / "docs/guides/website.md", FM.format(body="id: GUIDE-website\ntype: guide\ntitle: Website\n") + "# x\n")
+
+    def checks(v: Path, lint_on: bool) -> None:
+        write(v / "tools/gates/gates.toml", "".join(
+            f'[[gate]]\nid = "{gid}"\nlevel = 1\nenabled = {"true" if on else "false"}\ncmd = ["x"]\nwhat = "drill"\n\n'
+            for gid, on in (("lint", lint_on), ("unit", False))))
+
+    v = fresh(tmp, "kind-none", vault)
+    out = stage(v)
+    expect("`kind:`" in out and "docs/guides/website.md" not in out, "seeded: no project type yet → the agent is told "
+           "to write `kind:` first", out[:300])
+    v = fresh(tmp, "kind-website", vault)
+    edit(v / intent, *kind[1:])
+    guide(v)
+    out = stage(v)
+    expect("`docs/guides/website.md` §1" in out and "ჯერ ჩაწერე intent.md" not in out, "seeded: kind website → the "
+           "interview names its guide (§1)", out[:300])
+    rc, gout, _ = graph_check(v)
+    expect(rc == 0, "control: a project with kind website and its guide is a clean graph", gout[-200:], kind="control")
+    v = fresh(tmp, "kind-typo", vault)
+    edit(v / intent, "type: intent\n", "type: intent\nkind: webiste\n")
+    rc, gout, _ = graph_check(v)
+    expect(rc == 1 and "KIND" in gout, "seeded: kind webiste (a typo) → KIND", f"rc={rc} out={gout[-200:]!r}")
+    v = fresh(tmp, "kind-build-off", vault)
+    for rel_, old, new in [kind, *built, (plan, "status: draft", "status: approved")]:
+        edit(v / rel_, old, new)
+    checks(v, lint_on=False)
+    expect("ჯერ ჩართე კოდის შემოწმებები" in stage(v), "seeded: building with `lint` and `unit` both off → the agent "
+           "switches the code checks on first", stage(v)[:300])
+    checks(v, lint_on=True)
+    expect("ჯერ ჩართე კოდის შემოწმებები" not in stage(v), "control: a code check is on → no such note", stage(v)[:300],
+           kind="control")
+    edit(v / plan, "status: approved", "status: done")
+    guide(v)
+    expect("`docs/guides/website.md` §4" in stage(v), "seeded: a finished plan → the show step names the guide (§4)",
+           stage(v)[:300])
+    v = fresh(tmp, "graph-product-folders", vault)
+    write(v / "site/package.json", '{"name": "site"}\n')
+    write(v / "site/src/content/post.md", "---\ntitle: Post\nmeta:\n  tags: [a, b]\n---\n\n[menu](/menu)\n")
+    write(v / "game/node_modules/pkg/README.md", "[x](missing.md)\n")
+    rc, gout, _ = graph_check(v)
+    expect(rc == 0, "seeded: a site's own Markdown (site/ holds package.json) and a nested node_modules are the "
+           "product's — not checked as vault notes", f"rc={rc} out={gout[-240:]!r}")
+    write(v / "docs/notes.md", "[[nowhere-at-all]]\n")
+    rc, gout, _ = graph_check(v)
+    expect(rc == 1 and "LINK-BROKEN" in gout and "site/" not in gout and "node_modules" not in gout,
+           "control: the vault's own notes are still checked next to product folders", gout[-240:], kind="control")
 
 
 def approve(root: Path, args: str) -> str:
@@ -1141,7 +1202,10 @@ def g_cmd_gates(tmp: Path, v: Path) -> None:
     rc, out = gate(v, "--only", "cmd-noshell", env=env)
     expect(rc == 0 and re.search(r"PASS\s+cmd-noshell", out) is not None and not shell_ran.exists(),
            "seeded: `&` in a cmd list stays an argument — no shell ran the planted second command", out[-200:])
-    rc, out = gate(v, "--only", "lint")
+    # its own gates.toml: a project that has switched its code checks on must not turn this case red (D-044)
+    off = write(tmp / "off-gates.toml", '[[gate]]\nid = "lint"\nlevel = 1\nenabled = false\nreason = "drill"\n'
+                'what = "drill"\ncmd = ["no-such-drill-tool"]\n')
+    rc, out = gate(v, "--only", "lint", env={"GATES_TOML": str(off)})
     expect(rc == 2 and "SKIP" in out, "a run where every gate was skipped proved nothing → exit 2", out[-200:])
     empty = tmp / "gates-empty"
     empty.mkdir()
