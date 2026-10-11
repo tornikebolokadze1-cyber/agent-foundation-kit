@@ -1,0 +1,86 @@
+{
+  "collapse-filter": false,
+  "search": "-path:memory/graph -path:orchestration/runs",
+  "showTags": false,
+  "showAttachments": false,
+  "hideUnresolved": false,
+  "showOrphans": true,
+  "collapse-color-groups": false,
+  "colorGroups": [
+    {
+      "query": "file:intent",
+      "color": {
+        "a": 1,
+        "rgb": 16747546
+      }
+    },
+    {
+      "query": "path:docs/adr",
+      "color": {
+        "a": 1,
+        "rgb": 4163071
+      }
+    },
+    {
+      "query": "path:docs/specs",
+      "color": {
+        "a": 1,
+        "rgb": 3061874
+      }
+    },
+    {
+      "query": "path:docs/plans",
+      "color": {
+        "a": 1,
+        "rgb": 10181072
+      }
+    },
+    {
+      "query": "path:docs/domain",
+      "color": {
+        "a": 1,
+        "rgb": 15119394
+      }
+    },
+    {
+      "query": "path:memory/episodes",
+      "color": {
+        "a": 1,
+        "rgb": 9080728
+      }
+    },
+    {
+      "query": "path:memory",
+      "color": {
+        "a": 1,
+        "rgb": 12872330
+      }
+    },
+    {
+      "query": "file:plan OR file:progress",
+      "color": {
+        "a": 1,
+        "rgb": 14701138
+      }
+    },
+    {
+      "query": "path:research",
+      "color": {
+        "a": 1,
+        "rgb": 6055024
+      }
+    }
+  ],
+  "collapse-display": false,
+  "showArrow": true,
+  "textFadeMultiplier": 0,
+  "nodeSizeMultiplier": 1.2,
+  "lineSizeMultiplier": 1,
+  "collapse-forces": true,
+  "centerStrength": 0.5,
+  "repelStrength": 12,
+  "linkStrength": 1,
+  "linkDistance": 220,
+  "scale": 1,
+  "close": false
+}

@@ -1,0 +1,165 @@
+# Deterministic gates — the machine checks that do not depend on any model's judgement.
+#
+# Run:   py -3.12 tools/gates/gate.py                 (every enabled gate, whole project)
+#        py -3.12 tools/gates/gate.py --pre-commit    (what .githooks/pre-commit runs)
+#        py -3.12 tools/gates/gate.py --files a b     (only these files; used by the Stop hook)
+#        py -3.12 tools/gates/gate.py --list          (show every gate, including the switched-off ones)
+#
+# Exit: 0 = every enabled gate passed · 1 = something failed · 2 = inconclusive (a gate could not
+# run, e.g. gitleaks missing). A switched-off gate prints SKIP, and SKIP is NOT a pass — the
+# summary line always says how many gates proved nothing.
+#
+# Levels switch on as the product grows (ADR-0006):
+#   0  foundation integrity — today
+#   1  code quality: lint + unit tests — when the stack ADR is accepted and src/ exists
+#   2  behaviour: evals (Georgian quality, grounding, the domain invariants in REVIEW.md) — when the agent answers
+#   3  security & robustness: dependency audit, SAST, e2e — before any public pilot
+#
+# Rules for changing this file (it is a protected harness file — the owner is asked first):
+#   - never lower a threshold or disable a gate to make a red run green; fix the cause
+#   - every new gate gets a seeded-defect drill in tools/gates/drill.py (ADR-0006)
+#   - `builtin` names a checker inside gate.py; `cmd` runs a command given as an argument list, without
+#     a shell (exit 0 = pass; a command that is not installed is INCONCLUSIVE, never a pass)
+
+[[gate]]
+id = "graph"
+level = 0
+enabled = true
+builtin = "graph"
+pre_commit = true
+stop = true
+what = "knowledge graph: links resolve, frontmatter valid, statuses legal, approval chain, owner ledger"
+
+[[gate]]
+id = "json"
+level = 0
+enabled = true
+builtin = "json"
+pre_commit = true
+stop = true
+what = "every project .json parses (settings, Obsidian config, eval data)"
+
+[[gate]]
+id = "toml"
+level = 0
+enabled = true
+builtin = "toml"
+pre_commit = true
+stop = true
+what = "every project .toml parses (gate and orchestration config)"
+
+[[gate]]
+id = "python"
+level = 0
+enabled = true
+builtin = "python"
+pre_commit = true
+stop = true
+what = "every project .py compiles (syntax)"
+
+[[gate]]
+id = "shell"
+level = 0
+enabled = true
+builtin = "shell"
+pre_commit = true
+stop = true
+what = "every shell script passes bash -n (syntax)"
+
+[[gate]]
+id = "eol"
+level = 0
+enabled = true
+builtin = "eol"
+pre_commit = true
+stop = true
+what = "no CRLF line endings in project text files (CRLF breaks bash and pollutes diffs)"
+
+[[gate]]
+id = "secrets"
+level = 0
+enabled = true
+builtin = "secrets"
+pre_commit = true
+stop = false
+what = "gitleaks finds no credential (staged files before a commit, the working tree otherwise)"
+
+[[gate]]
+id = "instructions"
+level = 0
+enabled = true
+builtin = "instructions"
+pre_commit = true
+stop = false  # whole-project scan: belongs at commit, not the per-session Stop hook (would blame this session for another's files — L-007)
+what = "no hidden characters (Unicode tags, bidi controls) in project text; no other tool's block or footprint in instruction files and the root (ADR-0007)"
+
+[[gate]]
+id = "tasks"
+level = 0
+enabled = true
+builtin = "tasks"
+pre_commit = true
+stop = false  # whole-project scan of tasks/*.md: belongs at commit, not the per-session Stop hook (L-007)
+what = "tasks/*.md: every task has a unique D-NNN id; a ticked task carries a dated receipt, and a commit it cites exists"
+
+[[gate]]
+id = "drill"
+level = 0
+enabled = true
+builtin = "drill"
+pre_commit = true
+stop = false
+what = "tools/gates/drill.py: every guard, hook and gate is broken on purpose and must catch it"
+
+# ── Level 1 — code quality (switched on together with the stack ADR) ──────────
+[[gate]]
+id = "lint"
+level = 1
+enabled = false
+cmd = ["ruff", "check", "."]
+pre_commit = true
+reason = "application code does not exist yet; ruff is not installed (needs the owner's OK)"
+what = "ruff: lint errors are failures"
+
+[[gate]]
+id = "unit"
+level = 1
+enabled = false
+cmd = ["py", "-3.12", "-m", "pytest", "-q"]
+pre_commit = true
+reason = "no tests/ yet — the first plan that writes code switches this on"
+what = "pytest: every unit test passes"
+
+# ── Level 2 — behaviour evals (switched on when the agent answers questions) ──
+[[gate]]
+id = "evals-georgian"
+level = 2
+enabled = false
+cmd = ["py", "-3.12", "evals/run.py", "--suite", "georgian", "--gate"]
+reason = "the agent does not exist yet; the suite is written from the first spec (see evals/README.md)"
+what = "Georgian regression: deterministic ≥95%, adversarial ≥95%, grammar ≥4.3/5"
+
+[[gate]]
+id = "evals-grounding"
+level = 2
+enabled = false
+cmd = ["py", "-3.12", "evals/run.py", "--suite", "grounding", "--gate"]
+reason = "the agent does not exist yet"
+what = "zero violations of the domain invariants in REVIEW.md; every factual claim traceable to its source"
+
+# ── Level 3 — security & robustness (before any public pilot) ─────────────────
+[[gate]]
+id = "deps-audit"
+level = 3
+enabled = false
+cmd = ["pip-audit"]
+reason = "no dependencies yet"
+what = "no known-vulnerable dependency"
+
+[[gate]]
+id = "e2e"
+level = 3
+enabled = false
+cmd = ["npx", "playwright", "test"]
+reason = "no web surface yet"
+what = "end-to-end conversation flows pass in a real browser"

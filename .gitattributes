@@ -1,0 +1,25 @@
+# One line ending for every text file, on every machine: LF.
+# Windows tools sometimes write CRLF; a shell script with CRLF breaks in bash,
+# and mixed endings make diffs unreadable. The `eol` gate checks this too.
+* text=auto eol=lf
+
+# Windows-only script formats keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary — never touched
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.xlsx binary
+*.docx binary
+*.pptx binary
+*.mp4 binary
+*.mp3 binary
+*.wav binary

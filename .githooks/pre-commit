@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Pre-commit gate (ADR-0006): runs the level-0 gates marked pre_commit in tools/gates/gates.toml —
+# knowledge graph, JSON/TOML/Python/shell syntax, line endings, gitleaks on the staged files, and the
+# drill that proves every check can still fail. Any FAIL or INCONCLUSIVE stops the commit.
+# Bypassing it (--no-verify, commit -n, core.hooksPath override) is denied by the project's settings
+# and by the guard. Fix what failed instead.
+set -u
+ROOT="$(git rev-parse --show-toplevel)" || exit 1
+bash "$ROOT/.claude/hooks/py.sh" tools/gates/gate.py --pre-commit --quiet
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "pre-commit: gates did not pass (exit $rc) — commit stopped. Details: py -3.12 tools/gates/gate.py --pre-commit" >&2
+  exit 1
+fi
+exit 0

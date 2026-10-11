@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "disableBypassPermissionsMode": "disable",
+    "deny": [
+      "Read(.env)",
+      "Read(.env.local)",
+      "Read(.env.*.local)",
+      "Read(.env.production)",
+      "Read(.env.development)",
+      "Read(.env.staging)",
+      "Read(.env.test)",
+      "Read(*.pem)",
+      "Read(*.key)",
+      "Read(*.p12)",
+      "Read(*.pfx)",
+      "Read(/secrets/**)",
+      "Read(credentials*.json)",
+      "Read(serviceAccountKey*.json)",
+      "Read(**/.env)",
+      "Read(**/.env.local)",
+      "Read(**/.env.production)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/secrets/**)",
+      "Bash(type *.env*)",
+      "Bash(head *.env*)",
+      "Bash(tail *.env*)",
+      "Bash(more *.env*)",
+      "Bash(less *.env*)",
+      "Bash(Get-Content *.env*)",
+      "Edit(/memory/approvals.md)",
+      "Write(/memory/approvals.md)",
+      "Edit(/memory/episodes/INDEX.md)",
+      "Write(/memory/episodes/INDEX.md)",
+      "Bash(git commit*--no-verify*)",
+      "Bash(git commit -n*)",
+      "Bash(git push*--no-verify*)",
+      "Bash(git push*--force*)",
+      "Bash(git push -f*)",
+      "Bash(git -c core.hooksPath*)"
+    ],
+    "ask": [
+      "Edit(/.claude/settings.json)",
+      "Write(/.claude/settings.json)",
+      "Edit(/.claude/settings.local.json)",
+      "Write(/.claude/settings.local.json)",
+      "Edit(/.claude/hooks/**)",
+      "Write(/.claude/hooks/**)",
+      "Edit(/.githooks/**)",
+      "Write(/.githooks/**)",
+      "Edit(/tools/**)",
+      "Write(/tools/**)",
+      "Edit(/.claude/skills/**)",
+      "Write(/.claude/skills/**)",
+      "Edit(/.claude/agents/**)",
+      "Write(/.claude/agents/**)",
+      "Edit(/.claude/rules/**)",
+      "Write(/.claude/rules/**)",
+      "Edit(/orchestration/**)",
+      "Write(/orchestration/**)",
+      "Edit(/CLAUDE.md)",
+      "Write(/CLAUDE.md)",
+      "Edit(/AGENTS.md)",
+      "Write(/AGENTS.md)",
+      "Edit(/REVIEW.md)",
+      "Write(/REVIEW.md)",
+      "Edit(/memory/LESSONS.md)",
+      "Write(/memory/LESSONS.md)",
+      "Bash(pip install*)",
+      "Bash(pip3 install*)",
+      "Bash(py -3.12 -m pip*)",
+      "Bash(python -m pip*)",
+      "Bash(uv *)",
+      "Bash(npm install*)",
+      "Bash(npm i *)",
+      "Bash(npx *)",
+      "Bash(winget *)",
+      "Bash(choco *)",
+      "Bash(rm *)",
+      "Bash(rmdir *)",
+      "Bash(git rm*)",
+      "Bash(git push*)",
+      "Bash(git merge*)",
+      "Bash(git rebase*)",
+      "Bash(git reset*)",
+      "Bash(git restore*)",
+      "Bash(git checkout -- *)",
+      "Bash(git stash*)",
+      "Bash(git branch -d*)",
+      "Bash(git config*)",
+      "Bash(py -3.12 orchestration/run.py arch*)",
+      "Bash(py -3.12 orchestration/run.py code-check*)",
+      "Bash(codex *)",
+      "mcp__*"
+    ],
+    "allow": [
+      "Bash(py -3.12 tools/context_graph.py*)",
+      "Bash(py -3.12 tools/gates/gate.py*)",
+      "Bash(py -3.12 tools/gates/drill.py*)",
+      "Bash(py -3.12 .claude/hooks/episodic.py index*)",
+      "Bash(py -3.12 .claude/hooks/episodic.py status*)",
+      "Bash(py -3.12 orchestration/run.py status*)",
+      "Bash(py -3.12 tools/observe.py*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git show*)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git branch --show-current)",
+      "Bash(git switch -c *)",
+      "Bash(git rev-parse*)",
+      "Bash(git ls-files*)"
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py.sh\" .claude/hooks/statusline.py",
+    "refreshInterval": 15
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py.sh\" .claude/hooks/episodic.py start",
+            "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py.sh\" tools/context_graph.py brief",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py.sh\" .claude/hooks/episodic.py compact",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py.sh\" .claude/hooks/episodic.py end",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py.sh\" .claude/hooks/guard.py",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(Bash|PowerShell|Read|Grep|WebFetch|WebSearch|mcp__.*)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py.sh\" .claude/hooks/sentinel.py post",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py.sh\" .claude/hooks/sentinel.py prompt",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py.sh\" .claude/hooks/stop_gate.py",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

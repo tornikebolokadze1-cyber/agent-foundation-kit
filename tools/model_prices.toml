@@ -1,0 +1,58 @@
+# API list prices in USD per million tokens — the one place tools/cache_cost.py reads them from (ADR-0010).
+# Source: Anthropic's model table in the claude-api reference, cached 2026-10-06 (read 2026-10-10).
+# A cache write costs input × write_5m (5-minute cache) or input × write_1h (1-hour cache); a cache read costs
+# cache_read. A value marked "0.1x" is derived from the documented rule "cache reads cost ~0.1x base input",
+# because the table gives no separate number for that model.
+# Change a price here only. A model missing from this file is reported as UNPRICED, never counted as free.
+source = "Anthropic model table (claude-api reference), cached 2026-10-06"
+write_5m = 1.25
+write_1h = 2.0
+
+[models.claude-fable-5-1]
+input = 10.0
+output = 50.0
+cache_read = 0.25
+
+[models.claude-fable-5]
+input = 10.0
+output = 50.0
+cache_read = 1.0
+
+[models.claude-opus-5-5]
+input = 4.0
+output = 20.0
+cache_read = 0.20
+
+[models.claude-opus-5]
+input = 5.0
+output = 25.0
+cache_read = 0.50  # 0.1x
+
+[models.claude-opus-4-8]
+input = 5.0
+output = 25.0
+cache_read = 0.50  # 0.1x
+
+[models.claude-sonnet-5-5]
+input = 2.0
+output = 10.0
+cache_read = 0.20
+
+[models.claude-sonnet-5]
+input = 2.0
+output = 10.0
+cache_read = 0.20  # 0.1x
+
+[models.claude-haiku-5-5]
+input = 0.10
+output = 0.50
+cache_read = 0.01  # 0.1x
+long_threshold = 100000  # a prompt longer than this is billed at the long rates below
+long_input = 0.50
+long_output = 2.50
+long_cache_read = 0.05  # 0.1x
+
+[models.claude-haiku-4-5]
+input = 1.0
+output = 5.0
+cache_read = 0.10  # 0.1x

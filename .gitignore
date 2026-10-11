@@ -1,0 +1,55 @@
+# ── Secrets: never committed (security.md §4). Real values live only in .env ──
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+secrets/
+credentials*.json
+serviceAccountKey*.json
+
+# ── Claude Code: machine-local files ──
+.claude/settings.local.json
+# handoff notes that a personal global PreCompact hook may write; this project keeps the
+# same information in memory/episodes/ (see memory/README.md)
+.claude/handoff-*.md
+.claude/state/
+
+# ── Generated (rebuilt on demand, never hand-edited) ──
+memory/graph/
+
+# ── Tool caches and machine-local runtime state ──
+.deepeval/
+# SQLite task databases written by the AIWorkHub tool, if it is installed — runtime state, not project
+.aiworkhub/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+node_modules/
+dist/
+build/
+
+# ── Editors / OS ──
+# some personal setups regenerate tasks.json on every Claude session start/end
+# (auto-restore of open sessions) — machine-local, not project state
+.vscode/tasks*.json
+**/.vscode/tasks*.json
+.obsidian/workspace*.json
+.obsidian/cache
+.obsidian/plugins/
+.obsidian/themes/
+.trash/
+Thumbs.db
+desktop.ini
+.DS_Store
+*.backup-*
+*.tmp

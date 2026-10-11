@@ -1,0 +1,15 @@
+{
+  "userIgnoreFilters": [
+    "memory/graph/",
+    "orchestration/runs/",
+    "node_modules/"
+  ],
+  "newLinkFormat": "shortest",
+  "useMarkdownLinks": false,
+  "alwaysUpdateLinks": true,
+  "newFileLocation": "folder",
+  "newFileFolderPath": "docs",
+  "attachmentFolderPath": "docs/assets",
+  "showLineNumber": true,
+  "propertiesInDocument": "visible"
+}
