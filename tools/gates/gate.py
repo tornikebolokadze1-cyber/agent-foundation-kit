@@ -32,6 +32,9 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
+# Windows looks for a program in the current folder before PATH unless this is set. Here the current folder is the
+# project, where a planted gitleaks.bat would otherwise stand in for the scanner and report a pass (review S4).
+os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
@@ -199,22 +202,30 @@ def untracked_files(root: Path) -> list[Path] | None:
     return [root / n for n in r.stdout.decode("utf-8", "replace").split("\0") if n and (root / n).is_file()]
 
 
-SCAN_MAX_BYTES = 2_000_000
+SCAN_CHUNK, SCAN_OVERLAP = 1_000_000, 8_192
 
 
-def staged_blobs(root: Path) -> list[tuple[str, bytes]] | None:
-    """(path, staged content) of every file the next commit adds or changes; None if git cannot say."""
-    r = subprocess.run(["git", "-C", str(root), "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR"],
-                       capture_output=True, timeout=30)
+def staged_blobs(root: Path) -> tuple[list[tuple[str, bytes | None]], str]:
+    """(path, staged content) of every file the next commit adds or changes, and what went wrong ("" when nothing).
+    A submodule entry (gitlink, mode 160000) points at another repository's commit — no content: listed with None."""
+    r = subprocess.run(["git", "-C", str(root), "diff", "--cached", "--raw", "-z", "--no-abbrev", "--no-renames",
+                        "--diff-filter=ACMT"], capture_output=True, timeout=30)
     if r.returncode != 0:
-        return None
+        return [], "git could not list the staged files"
+    fields = r.stdout.decode("utf-8", "replace").split("\0")
     out = []
-    for name in (n for n in r.stdout.decode("utf-8", "replace").split("\0") if n):
-        blob = subprocess.run(["git", "-C", str(root), "show", f":{name}"], capture_output=True, timeout=30)
+    for meta, name in zip(fields[0::2], fields[1::2]):  # ":old_mode new_mode old_sha new_sha status", then the path
+        parts = meta.split()
+        if len(parts) != 5 or not name:
+            return [], f"git listed a staged entry it could not parse ({meta[:60]!r})"
+        if parts[1] == "160000":
+            out.append((name, None))
+            continue
+        blob = subprocess.run(["git", "-C", str(root), "cat-file", "blob", parts[3]], capture_output=True, timeout=30)
         if blob.returncode != 0:
-            return None
+            return [], f"git could not read the staged {name}"
         out.append((name, blob.stdout))
-    return out
+    return out, ""
 
 
 def engine_scan(root: Path, files: list[Path], pre_commit: bool) -> Result:
@@ -222,10 +233,9 @@ def engine_scan(root: Path, files: list[Path], pre_commit: bool) -> Result:
     reads the same files. It has no entropy threshold and does not read git history; the result line says so."""
     label = "staged" if pre_commit else "working-tree"
     if pre_commit:
-        blobs = staged_blobs(root)
-        if blobs is None:
-            return Result("secrets", "INCONCLUSIVE", "gitleaks not installed and git could not list the staged files — "
-                                                     "nothing was scanned")
+        blobs, err = staged_blobs(root)
+        if err:
+            return Result("secrets", "INCONCLUSIVE", f"gitleaks not installed and {err} — nothing was scanned")
     else:
         blobs = []
         for p in files:
@@ -233,19 +243,49 @@ def engine_scan(root: Path, files: list[Path], pre_commit: bool) -> Result:
                 blobs.append((rel(root, p), p.read_bytes()))
             except OSError as e:
                 return Result("secrets", "INCONCLUSIVE", f"engine scanner could not read {rel(root, p)}: {e}")
-    found, scanned, skipped = [], 0, 0
+    found, scanned, binary, links = [], 0, [], 0
     for name, data in blobs:
-        if b"\0" in data[:8192] or len(data) > SCAN_MAX_BYTES:
-            skipped += 1
+        if data is None:
+            links += 1
+            continue
+        text = readable(data)
+        if text is None:
+            binary.append(name)
             continue
         scanned += 1
-        text = data.decode("utf-8", "replace")
-        for kind, start, _end in redact.find_secrets(text, skip_decoys=True):
-            found.append(f"{label} {name}:{text.count(chr(10), 0, start) + 1} — {kind}")  # never the value
-    note = f", {skipped} binary or over 2 MB NOT scanned" if skipped else ""
-    return Result("secrets", "FAIL" if found else "PASS",
-                  f"engine scanner (gitleaks not installed — no entropy threshold, git history not scanned): "
-                  f"{scanned} {label} file(s){note}", found)
+        found += [f"{label} {name}:{line} — {kind}" for kind, line in secret_lines(text)]  # never the value
+    summary = ("engine scanner (gitleaks not installed — no entropy threshold, git history not scanned, a token marked as "
+               f"an example right beside it is not counted): {scanned} {label} file(s)"
+               + (f", {len(binary)} binary NOT scanned" if binary else "")
+               + (f", {links} submodule pointer(s) — no content" if links else ""))
+    shown = [f"binary, not scanned: {b}" for b in binary[:10]]
+    if found:
+        return Result("secrets", "FAIL", summary, found)
+    if binary and not scanned:  # content was there and none of it could be read
+        return Result("secrets", "INCONCLUSIVE", summary + " — nothing readable was scanned", shown)
+    return Result("secrets", "PASS", summary, shown)
+
+
+def readable(data: bytes) -> str | None:
+    """A file's text, or None for a binary one. UTF-16 with a byte-order mark is text, not binary."""
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16", "replace")
+    if b"\0" in data[:8192]:
+        return None
+    return data.decode("utf-8", "replace")
+
+
+def secret_lines(text: str) -> list[tuple[str, int]]:
+    """(kind, line) of every credential in `text`, read in overlapping 1 MB pieces: a large file is scanned whole at
+    a cost that grows with its size, and a token on a piece's edge is complete in one of them."""
+    seen: set[int] = set()
+    out = []
+    for base in range(0, len(text) or 1, SCAN_CHUNK):
+        for kind, start, _end in redact.find_secrets(text[base:base + SCAN_CHUNK + SCAN_OVERLAP], skip_decoys=True):
+            if base + start not in seen:
+                seen.add(base + start)
+                out.append((kind, text.count("\n", 0, base + start) + 1))
+    return out
 
 
 def gate_secrets(root: Path, files: list[Path], pre_commit: bool = False, **_) -> Result:

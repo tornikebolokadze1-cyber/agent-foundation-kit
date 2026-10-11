@@ -71,10 +71,18 @@ INJECTION_PATTERNS: list[re.Pattern[str]] = [
 ]
 
 
+DECOY_WINDOW = 60  # characters on either side of the token, on its own line
+
+
 def _is_decoy(text: str, start: int, end: int) -> bool:
+    """A token is documentation when it, or the text right beside it on its line, says so. A decoy word elsewhere on a
+    long line (minified JSON) or inside a key's body proves nothing about this token (review S2)."""
     line_start = text.rfind("\n", 0, start) + 1
     line_end = text.find("\n", end)
-    return bool(DECOY_RE.search(text[line_start:len(text) if line_end == -1 else line_end]))
+    line_end = len(text) if line_end == -1 else line_end
+    token = text[start:end] if "\n" not in text[start:end] else ""
+    near = text[max(line_start, start - DECOY_WINDOW):start] + " " + token + " " + text[end:min(line_end, end + DECOY_WINDOW)]
+    return bool(DECOY_RE.search(near))
 
 
 def find_secrets(text: str, skip_decoys: bool = False) -> list[tuple[str, int, int]]:

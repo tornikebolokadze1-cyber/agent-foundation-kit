@@ -6,7 +6,7 @@
 #        py -3.12 tools/gates/gate.py --list          (show every gate, including the switched-off ones)
 #
 # Exit: 0 = every enabled gate passed · 1 = something failed · 2 = inconclusive (a gate could not
-# run, e.g. gitleaks missing). A switched-off gate prints SKIP, and SKIP is NOT a pass — the
+# run, e.g. git could not list the staged files). A switched-off gate prints SKIP, and SKIP is NOT a pass — the
 # summary line always says how many gates proved nothing.
 #
 # Levels switch on as the product grows (ADR-0006):

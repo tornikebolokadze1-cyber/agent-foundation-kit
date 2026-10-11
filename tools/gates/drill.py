@@ -95,6 +95,33 @@ def py(script: str, *args: str, **kw) -> tuple[int, str, str]:
     return check([PY, str(CODE / script), *args], **kw)
 
 
+def gitleaks_installed() -> bool:
+    """The drill's own answer — never gate.find_gitleaks, so a regression in that search cannot hide behind it."""
+    explicit = os.environ.get("GITLEAKS_BIN")
+    if explicit:
+        return Path(explicit).exists()
+    return shutil.which("gitleaks") is not None or any((Path.home() / "bin" / n).exists() for n in ("gitleaks.exe", "gitleaks"))
+
+
+# Hiding gitleaks from PATH also hides whatever shares its folder (git in Scoop's shims, Homebrew's bin, /usr/bin), so a
+# case that needs "no gitleaks" — or a given one — swaps the one function every caller asks: gate.find_gitleaks.
+WITH_GITLEAKS = ("import sys, runpy; sys.path.insert(0, sys.argv[1]); import gate; "
+                 "gate.find_gitleaks = lambda found=sys.argv[2] or None: found; ")
+
+
+def gate_with_gitleaks(found: str | None, root: Path, *args: str) -> tuple[int, str]:
+    """gate.py as on a machine where the gitleaks search finds `found` (None = not installed)."""
+    rc, out, err = check([PY, "-c", WITH_GITLEAKS + "sys.exit(gate.main(sys.argv[3:]))", str(CODE / "tools/gates"),
+                          found or "", *args], env={"GATE_ROOT": str(root), "GITLEAKS_BIN": None})
+    return rc, out + err
+
+
+def firstrun_with_gitleaks(found: str | None, env: dict) -> tuple[int, str, str]:
+    """.claude/hooks/firstrun.py as on a machine where the gitleaks search finds `found` (None = not installed)."""
+    return check([PY, "-c", WITH_GITLEAKS + "runpy.run_path(sys.argv[3], run_name='__main__')", str(CODE / "tools/gates"),
+                  found or "", str(CODE / ".claude/hooks/firstrun.py")], env=env)
+
+
 # ── fixture vault ────────────────────────────────────────────────────────────
 FM = "---\n{body}---\n\n"
 
@@ -239,16 +266,19 @@ def g_graph_stage(tmp: Path, vault: Path) -> None:
     adr_ok = (adr, "status: proposed", "status: accepted")
     engine = (adr, "date: 2026-01-01\n", "date: 2026-01-01\nscope: engine\n")
     empty_idea = (intent, "# Intent\n\n", "# Intent\n\n## 1. ხედვა\n\n_დაწერე შენი იდეა — აქ ჩაიწერება._\n\n## 2. მიზნები\n\n")
+    idea = (intent, "# Intent\n\n", "# Intent\n\n## 1. ხედვა\n\n_დაწერე შენი იდეა — აქ ჩაიწერება._\nსაცხობის საიტი\n\n"
+                                    "## 2. მიზნები\n\n")
     cases = [
         ("intent §1 is still the template", [empty_idea], "ეტაპი 1/5", "დაწერე შენი იდეა"),
         ("intent draft with an idea", [], "ეტაპი 1/5", "/approve intent"),
+        ("the idea written under the template's §1 placeholder", [idea], "ეტაპი 1/5", "/approve intent"),
         ("intent accepted, spec draft", [accepted], "ეტაპი 2/5", "/approve spec 0001"),
         ("spec approved, the project's ADR proposed", [accepted, spec_ok], "ეტაპი 3/5", "/approve adr 0001"),
         ("spec approved, only an engine ADR (scope: engine) proposed — not offered", [accepted, spec_ok, engine], "ეტაპი 3/5",
          "`/adr`-ით"),
         ("project ADR accepted, plan draft", [accepted, spec_ok, adr_ok], "ეტაპი 4/5", "/approve plan 0001"),
         ("plan approved", [accepted, spec_ok, adr_ok, (plan, "status: draft", "status: approved")], "ეტაპი 4/5",
-         "აშენება — PLAN-0001"),
+         "PLAN-0001 მიმდინარეობს"),
         ("plan done", [accepted, spec_ok, adr_ok, (plan, "status: draft", "status: done")], "ეტაპი 5/5", "PLAN-0001 დასრულებულია"),
     ]
     for label, edits, want, detail in cases:
@@ -277,6 +307,21 @@ def g_graph_stage(tmp: Path, vault: Path) -> None:
     rc, out, _ = py("tools/context_graph.py", "--root", str(v), "pending")
     expect(rc == 0 and "engine decisions" in out and out.index("ADR-0001") > out.index("engine decisions"),
            "seeded: `pending` lists an engine ADR apart from the project's documents", out[:240])
+    expect(rc == 0 and "/approve intent" not in out, "seeded: `pending` does not offer an intent whose §1 is still the "
+           "template", out[:240])
+    v = fresh(tmp, "stage-bad-id", vault)
+    write(v / "docs/specs/SPEC-0002-0001-odd.md", FM.format(
+        body='id: SPEC-0002-0001\ntype: spec\ntitle: Odd\nstatus: draft\ncreated: 2026-01-01\nupdated: 2026-01-01\n'
+             'intent: "[[intent]]"\n') + "body\n")
+    rc, out, _ = py("tools/context_graph.py", "--root", str(v), "pending")
+    odd = next((ln for ln in out.splitlines() if "SPEC-0002-0001" in ln), "")
+    expect(odd and "/approve spec 0001" not in odd and "id არასწორია" in odd, "seeded: a spec whose id is SPEC-0002-0001 "
+           "is never offered as `/approve spec 0001` (that approves another document)", out[:300])
+    v = fresh(tmp, "stage-bad-bytes", vault)
+    (v / intent).write_bytes((v / intent).read_bytes().replace(b"# Intent\n", b"# Intent\n\n## 1. \xe1\xe3\n\nsome \x93idea\x94\n"))
+    rc, out, err = py("tools/context_graph.py", "--root", str(v), "stage")
+    expect(rc == 0 and "ეტაპი 1/5" in out, "seeded: intent.md holding bytes that are not UTF-8 (a cp1252 quote) → the "
+           "stage is still read, no crash", (out + err)[-240:])
     v = fresh(tmp, "stage-scope", vault)
     edit(v / adr, "date: 2026-01-01\n", "date: 2026-01-01\nscope: engin\n")
     rc, out, _ = graph_check(v)
@@ -327,9 +372,27 @@ def g_approve(tmp: Path, vault: Path) -> Path:
     write(v / "docs/adr/ADR-0003-maybe.md", FM.format(body="id: ADR-0003\ntype: adr\ntitle: Maybe\nstatus: proposed\ndate: 2026-01-03\n") + "# x\n")
     out = approve(v, "reject adr 3 not now")
     expect(out.startswith("✅") and status(v / "docs/adr/ADR-0003-maybe.md") == "rejected", "control: reject adr → rejected", out[:160], kind="control")
+    expect("➡ ახლა: ეტაპი 4/5" in out, "seeded: after a reject the answer still names where the project stands", out[-200:])
     out = approve(v, "adr 0001")
     expect(out.startswith("❌"), "seeded: approving an already superseded ADR is refused", out[:160])
+    g_approve_stage_notes(tmp, vault)
     return v
+
+
+def g_approve_stage_notes(tmp: Path, vault: Path) -> None:
+    """/approve and the stage (ADR-0011): an empty intent cannot be approved; an engine ADR does not move the project."""
+    v = fresh(tmp, "approve-empty-intent", vault)
+    edit(v / "intent.md", "# Intent\n\n", "# Intent\n\n## 1. ხედვა\n\n_დაწერე შენი იდეა — აქ ჩაიწერება._\n\n## 2. მიზნები\n\n")
+    ledger = (v / "memory/approvals.md").read_text(encoding="utf-8")
+    out = approve(v, "intent")
+    expect(out.startswith("❌") and "§1" in out and status(v / "intent.md") == "draft"
+           and (v / "memory/approvals.md").read_text(encoding="utf-8") == ledger,
+           "seeded: /approve intent while §1 is still the template → refused, nothing written", out[:200])
+    v = fresh(tmp, "approve-engine-adr", vault)
+    edit(v / "docs/adr/ADR-0001-demo.md", "date: 2026-01-01\n", "date: 2026-01-01\nscope: engine\n")
+    out = approve(v, "adr 1")
+    expect(out.startswith("✅") and "scope: engine" in out and "➡ ახლა" not in out,
+           "seeded: approving an engine ADR says it is the engine's rule and does not announce a project stage", out[-200:])
 
 
 def guard(root: Path, state: Path, tool: str, tool_input: dict, sid: str = SID) -> tuple[int, str]:
@@ -887,8 +950,12 @@ def g_gates(tmp: Path, vault: Path) -> None:
     w = fresh(tmp, "gates-secret-ok", v)
     git(w, "add", "-A")
     rc, out = gate(w, "--only", "secrets", "--pre-commit")
-    expect(rc == 0 and re.search(r"PASS\s+secrets", out) is not None, "control: gitleaks finds nothing in clean staged files",
-           out[-240:], kind="control")
+    expect(rc == 0 and re.search(r"PASS\s+secrets", out) is not None, "control: the secrets gate finds nothing in clean "
+           "staged files", out[-240:], kind="control")
+    have_gl = gitleaks_installed()  # the cases below run with whatever this machine has; each names what it expects
+    expect(re.search(r"gitleaks \S+: scanned", out) is not None if have_gl else "engine scanner" in out,
+           f"seeded: the secrets gate uses the scanner this machine has ({'gitleaks' if have_gl else 'the engine scanner'}, "
+           "by the drill's own search) — never a silent fallback", out[-240:])
     w = fresh(tmp, "gates-secret", v)
     token = "ghp_" + "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36))
     write(w / "config.py", f'GITHUB_TOKEN = "{token}"\n')
@@ -897,16 +964,18 @@ def g_gates(tmp: Path, vault: Path) -> None:
     expect(rc == 1 and re.search(r"FAIL\s+secrets", out) is not None,
            "seeded: realistic (high-entropy) token staged → secrets FAIL", out[-240:])
     rc, out = gate(w, "--only", "secrets", env={"GITLEAKS_BIN": str(tmp / "no-gitleaks.exe")})
-    expect(rc == 2 and "INCONCLUSIVE" in out, "seeded: gitleaks missing → INCONCLUSIVE, never PASS", out[-200:])
+    expect(rc == 2 and "INCONCLUSIVE" in out and "GITLEAKS_BIN names" in out, "seeded: GITLEAKS_BIN names a file that "
+           "does not exist → INCONCLUSIVE, never PASS and never a silent fallback to the engine scanner", out[-200:])
     w = fresh(tmp, "gates-secret-untracked", v)
     git(w, "add", "-A")
     git(w, "commit", "-q", "-m", "fixture")
     rc, out = gate(w, "--only", "secrets")
-    expect(rc == 0 and "0 untracked file(s)" in out, "control: full secrets run on a clean committed tree passes", out[-240:],
-           kind="control")
+    # gitleaks names an untracked file "untracked …", the engine scanner (no gitleaks on the machine) "working-tree …"
+    expect(rc == 0 and ("0 untracked file(s)" if have_gl else "working-tree file(s)") in out,
+           "control: full secrets run on a clean committed tree passes", out[-240:], kind="control")
     write(w / "notes/local-config.py", f'GITHUB_TOKEN = "{token}"\n')
     rc, out = gate(w, "--only", "secrets")
-    expect(rc == 1 and "untracked notes/local-config.py" in out,
+    expect(rc == 1 and ("untracked notes/local-config.py" if have_gl else "working-tree notes/local-config.py:1") in out,
            "seeded: token in a never-staged (untracked) file → full run secrets FAIL", out[-240:])
     g_engine_scan(tmp, v, token)
     g_instructions_gate(tmp, v)
@@ -916,20 +985,16 @@ def g_gates(tmp: Path, vault: Path) -> None:
 
 def g_engine_scan(tmp: Path, v: Path, token: str) -> None:
     """No gitleaks on the machine (ADR-0011): the engine's own scanner does the work and says so — never a silent PASS."""
-    keep = [d for d in os.environ.get("PATH", "").split(os.pathsep)
-            if d and not any((Path(d) / n).exists() for n in ("gitleaks", "gitleaks.exe"))]
-    no_gitleaks = {"GITLEAKS_BIN": None, "PATH": os.pathsep.join(keep), "USERPROFILE": str(tmp / "home-without-gitleaks"),
-                   "HOME": str(tmp / "home-without-gitleaks")}
     w = fresh(tmp, "gates-engine-scan-ok", v)
     git(w, "add", "-A")
-    rc, out = gate(w, "--only", "secrets", "--pre-commit", env=no_gitleaks)
+    rc, out = gate_with_gitleaks(None, w, "--only", "secrets", "--pre-commit")
     expect(rc == 0 and re.search(r"PASS\s+secrets", out) is not None and "engine scanner" in out
            and "gitleaks not installed" in out, "control: no gitleaks, clean staged files → PASS, and the line says the "
            "engine's own scanner did it", out[-240:], kind="control")
     w = fresh(tmp, "gates-engine-scan", v)
     write(w / "config.py", f'GITHUB_TOKEN = "{token}"\n')
     git(w, "add", "-A")
-    rc, out = gate(w, "--only", "secrets", "--pre-commit", env=no_gitleaks)
+    rc, out = gate_with_gitleaks(None, w, "--only", "secrets", "--pre-commit")
     expect(rc == 1 and re.search(r"FAIL\s+secrets", out) is not None and "staged config.py:1 — github-token" in out
            and token not in out, "seeded: no gitleaks, a token staged → FAIL naming file:line and kind, never the value",
            out[-240:])
@@ -937,13 +1002,69 @@ def g_engine_scan(tmp: Path, v: Path, token: str) -> None:
     write(w / "docs/setup-example.md", f'GITHUB_TOKEN = "{token}"  # PLACEHOLDER — put your own token in .env\n')
     git(w, "add", "-A")
     git(w, "commit", "-q", "-m", "fixture")
-    rc, out = gate(w, "--only", "secrets", env=no_gitleaks)
+    rc, out = gate_with_gitleaks(None, w, "--only", "secrets")
     expect(rc == 0 and "working-tree file(s)" in out, "control: no gitleaks, a full run over a clean tree whose only "
            "token sits on a line marked PLACEHOLDER (documentation) → PASS", out[-240:], kind="control")
     write(w / "notes/local-config.py", f'GITHUB_TOKEN = "{token}"\n')
-    rc, out = gate(w, "--only", "secrets", env=no_gitleaks)
+    rc, out = gate_with_gitleaks(None, w, "--only", "secrets")
     expect(rc == 1 and "working-tree notes/local-config.py:1" in out,
            "seeded: no gitleaks, a token in an untracked file → the full run FAILs", out[-240:])
+    w = fresh(tmp, "gates-engine-scan-gitlink", v)
+    git(w, "add", "-A")
+    git(w, "commit", "-q", "-m", "fixture")
+    # a submodule's commit lives in the submodule, not here — reading it as an object of this repository must not happen
+    git(w, "update-index", "--add", "--cacheinfo", f"160000,{'1' * 40},vendor/theme")
+    rc, out = gate_with_gitleaks(None, w, "--only", "secrets", "--pre-commit")
+    expect(rc == 0 and re.search(r"PASS\s+secrets", out) is not None and "1 submodule pointer(s)" in out,
+           "control: no gitleaks, a staged submodule pointer (gitlink) has no content to read → skipped and counted, PASS",
+           out[-240:], kind="control")
+    write(w / "config.py", f'GITHUB_TOKEN = "{token}"\n')
+    git(w, "add", "config.py")
+    rc, out = gate_with_gitleaks(None, w, "--only", "secrets", "--pre-commit")
+    expect(rc == 1 and "staged config.py:1" in out and "INCONCLUSIVE" not in out, "seeded: no gitleaks, a staged gitlink "
+           "next to a staged token → the scan still reads the file and FAILs (never INCONCLUSIVE)", out[-240:])
+    g_engine_scan_reach(tmp, v, token)
+
+
+def g_engine_scan_reach(tmp: Path, v: Path, token: str) -> None:
+    """What the engine scanner must still read: UTF-16, large files, a token on a 1 MB piece's edge, a long one-line
+    file; and what it must never call clean: content it could not read, a scanner planted in the project (review r2)."""
+    other = "ghp_" + "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(36))
+    w = fresh(tmp, "gates-engine-scan-reach", v)
+    (w / "notes-utf16.txt").write_bytes(f'GITHUB_TOKEN = "{token}"\n'.encode("utf-16"))
+    big = "a" * 999_970 + "\n" + f'T = "{token}"\n' + "y = 1\n" * 300_000 + f'LAST = "{other}"\n'
+    write(w / "big.py", big)  # the first token crosses the 1 MB mark; the second sits ~2.8 MB in
+    write(w / "app.json", '{"title": "sample config", "padding": "' + "p" * 100 + f'", "token": "{token}"}}\n')
+    git(w, "add", "-A")
+    rc, out = gate_with_gitleaks(None, w, "--only", "secrets", "--pre-commit")
+    for name, line in (("notes-utf16.txt", 1), ("big.py", 2), ("big.py", 300_003), ("app.json", 1)):
+        expect(rc == 1 and f"staged {name}:{line} — github-token" in out,
+               f"seeded: no gitleaks, a token in {name} line {line} → found (UTF-16 · a token across the 1 MB mark · "
+               "~2.8 MB in · a decoy word far away on a one-line file)", out[-300:])
+    w = fresh(tmp, "gates-engine-scan-binary", v)
+    git(w, "add", "-A")
+    git(w, "commit", "-q", "-m", "fixture")
+    (w / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR" + bytes(range(256)))
+    git(w, "add", "logo.png")
+    rc, out = gate_with_gitleaks(None, w, "--only", "secrets", "--pre-commit")
+    expect(rc == 2 and "nothing readable was scanned" in out and "logo.png" in out,
+           "seeded: no gitleaks, only a binary file staged → INCONCLUSIVE naming it, never a PASS over nothing", out[-240:])
+    write(w / "readme.md", "plain text\n")
+    git(w, "add", "readme.md")
+    rc, out = gate_with_gitleaks(None, w, "--only", "secrets", "--pre-commit")
+    expect(rc == 0 and "1 binary NOT scanned" in out, "control: a binary file next to a clean text file → PASS that says "
+           "the binary was not scanned", out[-240:], kind="control")
+    w = fresh(tmp, "gates-planted-gitleaks", v)
+    git(w, "add", "-A")
+    planted = w / "planted.txt"
+    if os.name == "nt":
+        write(w / "gitleaks.bat", '@echo PLANTED-RAN> "%~dp0planted.txt"\n@exit /b 0\n')
+    else:
+        write(w / "gitleaks", '#!/bin/sh\necho PLANTED-RAN > "$(dirname "$0")/planted.txt"\nexit 0\n').chmod(0o755)
+    rc, out, err = check([PY, str(CODE / "tools/gates/gate.py"), "--only", "secrets", "--pre-commit"], cwd=w,
+                         env={"GATE_ROOT": str(w), "GITLEAKS_BIN": None, "NoDefaultCurrentDirectoryInExePath": None})
+    expect(not planted.exists(), "seeded: a gitleaks.bat planted in the project folder never runs in place of the real "
+           "scanner (Windows would look in the current folder first)", (out + err)[-200:])
 
 
 def g_tasks_gate(tmp: Path, v: Path) -> None:
@@ -1429,7 +1550,10 @@ def g_firstrun(tmp: Path) -> None:
     print("== first run (.claude/hooks/firstrun.py: git repository, commit checks, tools — ADR-0011) ==")
     gcfg = write(tmp / "fr-global.gitconfig", "[user]\n\tname = drill-global\n")
     before = gcfg.read_text(encoding="utf-8")
-    no_gitleaks = str(tmp / "no-gitleaks.exe")
+
+    def path_without(*tools: str) -> str:
+        return os.pathsep.join(d for d in os.environ.get("PATH", "").split(os.pathsep)
+                               if d and not any((Path(d) / n).exists() for t in tools for n in (t, t + ".exe")))
 
     def project(name: str) -> Path:
         p = tmp / name
@@ -1437,9 +1561,10 @@ def g_firstrun(tmp: Path) -> None:
         write(p / "intent.md", "# x\n")
         return p
 
-    def first(root: Path, **env: str | None) -> tuple[int, str]:
-        rc, out, err = py(".claude/hooks/firstrun.py", env={"FIRSTRUN_ROOT": str(root), "GIT_CONFIG_GLOBAL": str(gcfg),
-                                                             "EPISODIC_NESTED": None, "GITLEAKS_BIN": no_gitleaks, **env})
+    def first(root: Path, found: str | None = None, **env: str | None) -> tuple[int, str]:
+        """firstrun on a machine whose gitleaks search finds `found` (default: no gitleaks)."""
+        rc, out, err = firstrun_with_gitleaks(found, {"GITLEAKS_BIN": None, "FIRSTRUN_ROOT": str(root),
+                                                      "GIT_CONFIG_GLOBAL": str(gcfg), "EPISODIC_NESTED": None, **env})
         return rc, out + err
 
     def hooks_path(root: Path) -> str:
@@ -1471,6 +1596,22 @@ def g_firstrun(tmp: Path) -> None:
     rc, out = first(r)
     expect(hooks_path(r) == "my-hooks" and "my-hooks" in out,
            "seeded: the person's own core.hooksPath is kept and reported, never overwritten", out[-200:])
+    rc, out = first(r)
+    expect("my-hooks" in out, "seeded: commit checks that are off are said again at the next session start (a missing "
+           "tool is said once)", out[-200:])
+    own = write(tmp / "fr-own-global.gitconfig", "[user]\n\tname = drill\n\temail = drill@example.invalid\n"
+                "[core]\n\thooksPath = my-global-hooks\n")
+    o = project("fr-global-hooks")
+    rc, out = first(o, GIT_CONFIG_GLOBAL=str(own))
+    expect(hooks_path(o) == "" and "my-global-hooks" in out, "seeded: the person's own global core.hooksPath → this "
+           "repository is not switched over behind their back; the agent is told", out[-200:])
+    m = tmp / "fr-no-hook-file"
+    write(m / "intent.md", "# x\n")
+    run(["git", "-C", str(m), "init", "-q"])
+    run(["git", "-C", str(m), "config", "--local", "core.hooksPath", ".githooks"])
+    out = first(m)[1] + "\n" + first(m)[1]
+    expect(out.count(".githooks/pre-commit` არ არის") == 2, "seeded: core.hooksPath is .githooks but the hook file is "
+           "missing (git skips it without a word) → the agent is told at every session start", out[-240:])
     outer = tmp / "fr-outer"
     outer.mkdir()
     run(["git", "-C", str(outer), "init", "-q"])
@@ -1487,6 +1628,20 @@ def g_firstrun(tmp: Path) -> None:
     rc, out = first(k, GIT_CONFIG_GLOBAL=str(known))
     expect(rc == 0 and "git init" in out and "user.name" not in out and "user.email" not in out,
            "control: git already knows the person's name and e-mail → no identity note", out[-200:], kind="control")
+    y = project("fr-has-gitleaks")
+    rc, out = first(y, found=str(tmp / "gitleaks.exe"), GIT_CONFIG_GLOBAL=str(known))
+    expect(rc == 0 and "git init" in out and "gitleaks" not in out,
+           "control: gitleaks is installed → the note says only what was set up, nothing about gitleaks", out[-200:],
+           kind="control")
+    b = project("fr-broken-gitleaks")
+    rc, out = first(b, GITLEAKS_BIN=str(tmp / "no-gitleaks.exe"))
+    expect(rc == 0 and "GITLEAKS_BIN" in out and "winget install Gitleaks.Gitleaks" not in out,
+           "seeded: GITLEAKS_BIN names a missing file → told it is a broken setting (the gate stops INCONCLUSIVE), "
+           "not that the engine's scanner takes over", out[-200:])
+    g = project("fr-no-git")
+    rc, out = first(g, PATH=path_without("gitleaks", "git"))
+    expect(rc == 0 and "winget install Git.Git" in out and not (g / ".git").exists(),
+           "seeded: no git on the machine → the agent is told how to install it; nothing is created", out[-200:])
 
 
 def sl_stamp(minutes_ago: float) -> str:

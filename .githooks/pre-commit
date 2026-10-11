@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Pre-commit gate (ADR-0006): runs the level-0 gates marked pre_commit in tools/gates/gates.toml —
-# knowledge graph, JSON/TOML/Python/shell syntax, line endings, gitleaks on the staged files, and the
-# drill that proves every check can still fail. Any FAIL or INCONCLUSIVE stops the commit.
+# knowledge graph, JSON/TOML/Python/shell syntax, line endings, a secrets scan of the staged files
+# (gitleaks, or the engine's own scanner where gitleaks is not installed — ADR-0011), and the drill
+# that proves every check can still fail. Any FAIL or INCONCLUSIVE stops the commit.
 # Bypassing it (--no-verify, commit -n, core.hooksPath override) is denied by the project's settings
 # and by the guard. Fix what failed instead.
 set -u

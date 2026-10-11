@@ -14,6 +14,8 @@ paths:
   location: `intent.md` → intent · `plan.md` → roadmap · `progress.md` → progress ·
   `docs/specs/SPEC-*` → spec · `docs/plans/PLAN-*` → plan · `docs/adr/ADR-*` → adr ·
   `docs/domain/*` → domain · `memory/episodes/EP-*` → episode. File name starts with its id.
+  An engine ADR carries `scope: engine` (the engine's own rule — it never holds up the project's stage);
+  a project ADR has no `scope`. Any other value is a SCOPE error.
 - **Statuses:** intent draft/accepted · spec draft/review/approved/superseded ·
   plan draft/approved/in-progress/done · adr proposed/accepted/rejected/superseded.
   You may set only: intent draft · spec draft, review · plan draft, and in-progress/done on an approved

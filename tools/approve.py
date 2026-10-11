@@ -135,6 +135,8 @@ def plan_changes(g: cg.Graph, action: str, doc: cg.Node) -> tuple[list[tuple[cg.
         return [(doc, "rejected")], None
     if st not in FROM[kind]:
         return [], f"{doc.id} არის `{st}` — დამტკიცება შეიძლება მხოლოდ სტატუსიდან: {', '.join(sorted(FROM[kind]))}."
+    if kind == "intent" and not cg.idea_written(g.root / doc.path):
+        return [], "intent.md-ის §1 ჯერ ცარიელია — ჯერ იდეა უნდა ჩაიწეროს (`/intent`), მერე დამტკიცდება."
     changes = [(doc, TARGET[kind])]
     if kind == "spec":
         intents = related(g, doc, "intent")
@@ -200,13 +202,15 @@ def list_pending(g: cg.Graph) -> str:
     return "\n".join(lines)
 
 
-def next_step(root: Path) -> str:
+def next_step(root: Path, doc: cg.Node) -> str:
     """What comes after this decision — read from the documents, as the SessionStart brief reads it (ADR-0011)."""
+    if cg.is_engine(doc):
+        return "ℹ ეს ძრავის წესია (`scope: engine`) — პროექტის ეტაპს არ ცვლის."
     try:
         st = cg.project_stage(cg.load(root))
     except Exception as e:  # the decision itself is already recorded; only this hint failed
         return f"(შემდეგი ეტაპი ვერ განისაზღვრა: {type(e).__name__})"
-    return f"➡ ახლა: ეტაპი {st.number}/5 · {st.name} — {st.step}.\n   {st.person}."
+    return f"➡ ახლა: {st.label} — {st.step}.\n   {st.person}."
 
 
 def main(argv: list[str]) -> int:
@@ -248,7 +252,7 @@ def main(argv: list[str]) -> int:
     lines = [f"✅ {doc.id} „{doc.title}“ — {doc.status} → {target} ({verb}). ჩაიწერა memory/approvals.md-ში."]
     for node, st in changes[1:]:
         lines.append(f"   {node.id} → {st} (ჩაანაცვლა {doc.id}).")
-    lines.append(next_step(root))
+    lines.append(next_step(root, doc))
     print("\n".join(lines))
     return 0
 
