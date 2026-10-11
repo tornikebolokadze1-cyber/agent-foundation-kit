@@ -26,7 +26,10 @@ missing. (`approve.py` refuses a plan on an unapproved spec, and the CHAIN-PLAN 
 
 ## B. Executing an approved plan
 
-1. Set `status: in-progress` (allowed). Work task by task, on a branch.
+1. Set `status: in-progress` (allowed). Work task by task, on a branch. Before the first task, if the
+   `lint` and `unit` gates in `tools/gates/gates.toml` are both off, switch them on with the stack ADR's
+   commands, pointed at the project's own code (not the engine's `tools/`) — a protected file, so the person
+   says yes; `unit` goes on together with the first test (an empty test run proves nothing).
 2. For each task: failing test/eval first → code → `py -3.12 tools/gates/gate.py` green → tick the box
    → CHECKPOINT commit.
 3. If orchestration is enabled (`orchestration/config.toml`): after the task's code is ready, run
@@ -35,4 +38,5 @@ missing. (`approve.py` refuses a plan on an unapproved spec, and the CHAIN-PLAN 
 4. Any change of approach → append a dated line under `## გადახრები` (what and why). A change of scope
    → stop, reopen the plan (status only → draft) and ask the owner.
 5. Done = every task ticked, every gate green, the `verifier` subagent returns `VERDICT: pass`.
-   Then set `status: done` and update `plan.md` / `progress.md` (or run `/session-close`).
+   Then set `status: done` and update `plan.md` / `progress.md` (or run `/session-close`), and show the
+   result the way `docs/guides/<kind>.md` §4 describes.

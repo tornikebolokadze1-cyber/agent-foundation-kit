@@ -29,6 +29,7 @@ rule).
 | `docs/adr/` | architecture decisions `ADR-NNNN-slug.md` + index README |
 | `docs/specs/`, `docs/plans/` | feature specifications and implementation plans |
 | `docs/domain/` | verified domain facts, each dated and sourced |
+| `docs/guides/` | one guide per project type (`kind:` in intent.md — website, game, agent, automation, other): interview questions, stack options with their five commands, the first version, how to show it; the stage block names the part to use |
 | `memory/` | episodes, PROPOSALS, LESSONS, the owner's approvals ledger — map: `memory/README.md` |
 | `tools/context_graph.py` | the knowledge graph: `build`, `check`, `query <id>`, `pending`, `stage` (where the project stands — ADR-0011) |
 | `tools/approve.py` | the owner's approval — never run it yourself |

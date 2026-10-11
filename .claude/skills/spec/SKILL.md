@@ -16,7 +16,8 @@ comes first (a spec cannot be approved before that — `approve.py` refuses and 
 3. **Fill every section.** Requirements `REQ-NNN` each trace to a goal G*. Acceptance criteria are
    Given / When / Then, testable, and each names the gate, test or eval that will prove it. Include
    Georgian-language quality, grounding and the domain invariants (`REVIEW.md`, `docs/domain/`) where they
-   apply. Anything unknown → "ღია კითხვები", never a guess.
+   apply. Anything unknown → "ღია კითხვები", never a guess. The first version's scope and example criteria
+   for this kind of project are in `docs/guides/<kind>.md` §3.
 4. **Index** — add a row to `docs/specs/README.md` (wikilink to the file). When complete, set
    `status: review`.
 5. **Review** — run the `spec-reviewer` subagent on the file. Fix critical/high findings; record the

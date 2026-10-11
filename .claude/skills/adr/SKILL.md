@@ -10,6 +10,9 @@ argument-hint: "<the decision to record> | supersede ADR-NNNN"
    "why did we do it this way?". A reversible detail belongs in a plan's `## გადახრები`, not an ADR.
 2. **Context** — `intent.md` (goals, non-goals), accepted ADRs (`docs/adr/README.md`), domain facts,
    `py -3.12 tools/context_graph.py query <related id>`.
+   **The stack decision (stage 3)** takes its 2–3 options from `docs/guides/<kind>.md` §2 (`kind` is in
+   intent.md) and records the stack's five commands — install · run · lint · test · show — with lint and test
+   pointed at the project's own code folder, never the engine's `tools/`.
 3. **Large-scale decision + orchestration enabled?** Suggest the architecture loop to the owner:
    `py -3.12 orchestration/run.py arch --topic "…"` (Fable ↔ Astra, one round; the owner is asked).
    Its `synthesis.md` becomes this ADR's draft.
