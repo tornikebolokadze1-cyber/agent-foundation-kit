@@ -7,8 +7,8 @@
   tools/observe.py            never prints a secret in the observatory report
   tools/gates/drill.py        seeds one random token per kind and proves each one is caught
 
-Standard library only. The provider patterns follow the global secret-detection hook (same prefixes),
-so a value that one check calls a secret the other does too. No entropy threshold on purpose: gitleaks
+Standard library only. Each provider pattern matches that provider's token prefix, and the three readers
+share this one list, so a value one of them calls a secret the others do too. No entropy threshold on purpose: gitleaks
 already has one (and the blind spot that comes with it) — the two checks miss different things.
 """
 from __future__ import annotations
@@ -44,7 +44,7 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("url-credential", re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:(?P<secret>[^\s/:@]+)@")),
 ]
 
-# A line that announces itself as fake is documentation, not a leak (same words as the global hook).
+# A line that announces itself as fake is documentation, not a leak.
 DECOY_RE = re.compile(r"EXAMPLE|PLACEHOLDER|YOUR_|<your|xxxx|XXXX|REDACTED|dummy|DUMMY|sample|SAMPLE|"
                       r"changeme|CHANGEME|FAKE|fake")
 

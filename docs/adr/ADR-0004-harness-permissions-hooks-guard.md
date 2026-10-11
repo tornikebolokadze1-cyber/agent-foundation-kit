@@ -20,7 +20,7 @@ related:
 
 **1. წესები (`.claude/settings.json`) — სამი დონე:**
 
-- **deny (არასდროს):** საიდუმლოების წაკითხვა — Read ხელსაწყოთი (`.env`, `.env.local`, `*.pem`, `*.key`, `secrets/`, `credentials*.json`, ქვესაქაღალდეებშიც) და shell-ით (`type`, `head`, `tail`, `more`, `less`, `Get-Content` + `.env`; `cat *.env*` გლობალურადაა აკრძალული); კარიბჭეების გვერდის ავლა (`--no-verify`, `commit -n`, `-c core.hooksPath`); force push; `approvals.md`-ის და `episodes/INDEX.md`-ის ხელით ცვლა.
+- **deny (არასდროს):** საიდუმლოების წაკითხვა — Read ხელსაწყოთი (`.env`, `.env.local`, `*.pem`, `*.key`, `secrets/`, `credentials*.json`, ქვესაქაღალდეებშიც) და shell-ით (`type`, `head`, `tail`, `more`, `less`, `Get-Content` + `.env`; `cat` და სხვა ბრძანებები, რომლებიც საიდუმლოების ფაილს კითხულობს ან git-ში ამატებს, guard-ის B4 წესით ჩერდება); კარიბჭეების გვერდის ავლა (`--no-verify`, `commit -n`, `-c core.hooksPath`); force push; `approvals.md`-ის და `episodes/INDEX.md`-ის ხელით ცვლა.
 - **ask (მფლობელს ეკითხება):** ყველა ფაილი, რომელიც წყვეტს, რა შეუძლია ან რა ევალება აგენტს — `.claude/settings*.json`, hooks, `.githooks/`, მთელი `tools/` (გრაფი, `approve.py`, კარიბჭეები), `.claude/skills/`, `.claude/agents/`, `.claude/rules/`, მთელი `orchestration/`, `CLAUDE.md`, `AGENTS.md`, `REVIEW.md`, `memory/LESSONS.md` (ასე თვითგანვითარება მხოლოდ მფლობელის თანხმობით ხდება მანქანურადაც, არა მხოლოდ სიტყვით); პაკეტების დაყენება (`pip`, `npm`, `uv`, `winget`); ფაილების წაშლა (`rm`, `git rm`); `git push`, `merge`, `rebase`, `reset`; ორკესტრაციის გაშვება; `git config`.
 - **allow (კითხვის გარეშე):** პროექტის ინსტრუმენტები (`py -3.12 tools/…`, hooks-ის სკრიპტები), git-ის წაკითხვა და ჩვეულებრივი commit, ფაილების კითხვა.
 

@@ -980,7 +980,7 @@ def g_orchestration(tmp: Path, approved: Path) -> None:
 
 def token_samples() -> dict[str, str]:
     """One random, high-entropy credential per kind in tools/redact.py. Assembled at run time, so no literal
-    token ever sits in this file (gitleaks and the global secret hook would rightly refuse to let it in)."""
+    token ever sits in this file (gitleaks would rightly refuse to let it in at commit)."""
     al, up, hexa = string.ascii_letters + string.digits, string.ascii_uppercase + string.digits, "0123456789abcdef"
 
     def r(n: int, alphabet: str = al) -> str:
