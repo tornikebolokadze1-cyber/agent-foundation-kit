@@ -4,6 +4,7 @@ type: adr
 title: AI უსაფრთხოება და დაკვირვება — ფენები აგენტის ყოველ მოქმედებაზე
 status: proposed
 date: 2026-10-07
+scope: engine
 deciders: მფლობელი (`/approve`); შემთავაზებელი — Claude Opus 5.5
 related:
   - "[[ADR-0004-harness-permissions-hooks-guard]]"

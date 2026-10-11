@@ -4,6 +4,7 @@ type: adr
 title: საძირკველი და სამუშაო ციკლი — intent → spec → plan → code → gates → review
 status: proposed
 date: 2026-09-18
+scope: engine
 deciders: მფლობელი (`/approve`); შემთავაზებელი — Claude Opus 5
 related:
   - "[[intent]]"

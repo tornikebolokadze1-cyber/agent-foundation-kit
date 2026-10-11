@@ -13,8 +13,9 @@ argument-hint: "<the decision to record> | supersede ADR-NNNN"
 3. **Large-scale decision + orchestration enabled?** Suggest the architecture loop to the owner:
    `py -3.12 orchestration/run.py arch --topic "…"` (Fable ↔ Astra, one round; the owner is asked).
    Its `synthesis.md` becomes this ADR's draft.
-4. **Write** `docs/adr/ADR-NNNN-<english-kebab-slug>.md` (next free number), Georgian prose, with
-   frontmatter `id`, `type: adr`, `title`, `status: proposed`, `date`, `deciders`, `related` (quoted
+4. **Write** `docs/adr/ADR-NNNN-<english-kebab-slug>.md` (next free number — `docs/adr/README.md` names the
+   reserved ones; a project's own ADR has no `scope`, an engine rule gets `scope: engine` — ADR-0011), Georgian
+   prose, with frontmatter `id`, `type: adr`, `title`, `status: proposed`, `date`, `deciders`, `related` (quoted
    wikilinks), and sections: კონტექსტი · გადაწყვეტილება · განხილული ალტერნატივები (≥2, each with why
    not) · შედეგები (+ / −) · დადასტურება (prefer a machine check). Copy the shape of
    `docs/adr/ADR-0001-foundation-and-sdlc-loop.md`.

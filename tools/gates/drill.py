@@ -17,7 +17,7 @@ Everything runs in a throw-away sandbox with its own state directory: the real p
 succeeds and prints nothing; the drill must then report DEAD, otherwise it is a rubber stamp.
 
 Exit 0 = all ARMED · 1 = DEAD (a defect went uncaught) or DEFECT (a control failed) · 2 = INCONCLUSIVE.
-Groups: graph, approve, guard, sentinel, observe, episodic, stop, gates, orchestration, wiring, statusline
+Groups: graph, approve, guard, sentinel, observe, episodic, stop, gates, orchestration, wiring, firstrun, statusline
 (the engine's status line always; the owner's global one too when --statusline names it).
 """
 from __future__ import annotations
@@ -185,6 +185,7 @@ def g_graph(tmp: Path, vault: Path) -> None:
     rc, _, err = graph_check(empty)
     expect(rc == 2 and "INCONCLUSIVE" in err, "seeded: empty folder → exit 2 INCONCLUSIVE (not a pass)", f"rc={rc}")
     g_graph_schema(tmp, vault)
+    g_graph_stage(tmp, vault)
 
 
 def forge_ledger(v: Path, ident: str, change: str) -> None:
@@ -230,6 +231,59 @@ def g_graph_schema(tmp: Path, vault: Path) -> None:
            f"rc={rc} out={out[-200:]!r}")
 
 
+def g_graph_stage(tmp: Path, vault: Path) -> None:
+    """The stage conductor (ADR-0011): each document state maps to its F-stage and the next command."""
+    intent, spec, plan, adr = "intent.md", "docs/specs/SPEC-0001-demo.md", "docs/plans/PLAN-0001-demo.md", "docs/adr/ADR-0001-demo.md"
+    accepted = (intent, "status: draft", "status: accepted")
+    spec_ok = (spec, "status: draft", "status: approved")
+    adr_ok = (adr, "status: proposed", "status: accepted")
+    engine = (adr, "date: 2026-01-01\n", "date: 2026-01-01\nscope: engine\n")
+    empty_idea = (intent, "# Intent\n\n", "# Intent\n\n## 1. ხედვა\n\n_დაწერე შენი იდეა — აქ ჩაიწერება._\n\n## 2. მიზნები\n\n")
+    cases = [
+        ("intent §1 is still the template", [empty_idea], "ეტაპი 1/5", "დაწერე შენი იდეა"),
+        ("intent draft with an idea", [], "ეტაპი 1/5", "/approve intent"),
+        ("intent accepted, spec draft", [accepted], "ეტაპი 2/5", "/approve spec 0001"),
+        ("spec approved, the project's ADR proposed", [accepted, spec_ok], "ეტაპი 3/5", "/approve adr 0001"),
+        ("spec approved, only an engine ADR (scope: engine) proposed — not offered", [accepted, spec_ok, engine], "ეტაპი 3/5",
+         "`/adr`-ით"),
+        ("project ADR accepted, plan draft", [accepted, spec_ok, adr_ok], "ეტაპი 4/5", "/approve plan 0001"),
+        ("plan approved", [accepted, spec_ok, adr_ok, (plan, "status: draft", "status: approved")], "ეტაპი 4/5",
+         "აშენება — PLAN-0001"),
+        ("plan done", [accepted, spec_ok, adr_ok, (plan, "status: draft", "status: done")], "ეტაპი 5/5", "PLAN-0001 დასრულებულია"),
+    ]
+    for label, edits, want, detail in cases:
+        v = fresh(tmp, f"stage-{abs(hash(label))}", vault)
+        for rel_, old, new in edits:
+            edit(v / rel_, old, new)
+        rc, out, _ = py("tools/context_graph.py", "--root", str(v), "stage")
+        offered = "/approve adr 0001" in out
+        expect(rc == 0 and want in out and detail in out and (engine not in edits or not offered),
+               f"seeded: {label} → {want} ({detail})", out[:240])
+    v = fresh(tmp, "stage-no-spec", vault)
+    edit(v / intent, *accepted[1:])
+    for rel_ in (spec, plan):
+        (v / rel_).unlink()
+    rc, out, _ = py("tools/context_graph.py", "--root", str(v), "stage")
+    expect(rc == 0 and "ეტაპი 2/5" in out and "`/spec`" in out, "seeded: intent accepted, no spec yet → ეტაპი 2/5 (`/spec`)",
+           out[:240])
+    v = fresh(tmp, "stage-brief", vault)
+    for rel_, old, new in (empty_idea, engine):
+        edit(v / rel_, old, new)
+    rc, out, _ = py("tools/context_graph.py", "--root", str(v), "brief", env={"EPISODIC_NESTED": None})
+    ctx = json.loads(out).get("hookSpecificOutput", {}).get("additionalContext", "") if rc == 0 and out.strip() else ""
+    expect(ctx.startswith("## ეტაპი") and "/approve intent" not in ctx and "/approve adr 0001" not in ctx
+           and "scope: engine" in ctx, "seeded: the SessionStart brief opens with the stage; an empty intent and an engine "
+           "ADR are not offered for approval (the engine ADR gets its own line)", ctx[:240])
+    rc, out, _ = py("tools/context_graph.py", "--root", str(v), "pending")
+    expect(rc == 0 and "engine decisions" in out and out.index("ADR-0001") > out.index("engine decisions"),
+           "seeded: `pending` lists an engine ADR apart from the project's documents", out[:240])
+    v = fresh(tmp, "stage-scope", vault)
+    edit(v / adr, "date: 2026-01-01\n", "date: 2026-01-01\nscope: engin\n")
+    rc, out, _ = graph_check(v)
+    expect(rc == 1 and "SCOPE" in out, "seeded: an ADR with a misspelt scope → SCOPE (it would silently join the "
+           "project's stages)", f"rc={rc} out={out[-200:]!r}")
+
+
 def approve(root: Path, args: str) -> str:
     rc, out, err = py("tools/approve.py", args, env={"APPROVE_ROOT": str(root)})
     return out + err
@@ -249,12 +303,16 @@ def g_approve(tmp: Path, vault: Path) -> Path:
            "seeded: spec before an accepted intent is refused, nothing written", out[:160])
     out = approve(v, "intent")
     expect(out.startswith("✅") and status(v / "intent.md") == "accepted", "control: /approve intent → accepted", out[:160], kind="control")
+    expect("ეტაპი 2/5" in out and "/approve spec 0001" in out,
+           "seeded: after /approve intent the answer names the next stage (2/5) and its command", out[-200:])
     out = approve(v, "spec 1")
     expect(out.startswith("✅") and status(spec) == "approved", "control: /approve spec 1 → approved", out[:160], kind="control")
     out = approve(v, "plan 0001 drill note")
     expect(out.startswith("✅") and status(v / "docs/plans/PLAN-0001-demo.md") == "approved", "control: /approve plan → approved", out[:160], kind="control")
     out = approve(v, "adr 1")
     expect(out.startswith("✅") and status(v / "docs/adr/ADR-0001-demo.md") == "accepted", "control: /approve adr 1 → accepted", out[:160], kind="control")
+    expect("ეტაპი 4/5" in out and "PLAN-0001" in out,
+           "seeded: after the project's first ADR the answer moves on to building (4/5, PLAN-0001)", out[-200:])
     rc, gout, _ = graph_check(v)
     expect(rc == 0, "control: after owner approvals the graph (LEDGER, CHAIN) is clean", gout[-200:], kind="control")
     write(v / "docs/adr/ADR-0002-next.md", FM.format(
@@ -850,9 +908,42 @@ def g_gates(tmp: Path, vault: Path) -> None:
     rc, out = gate(w, "--only", "secrets")
     expect(rc == 1 and "untracked notes/local-config.py" in out,
            "seeded: token in a never-staged (untracked) file → full run secrets FAIL", out[-240:])
+    g_engine_scan(tmp, v, token)
     g_instructions_gate(tmp, v)
     g_tasks_gate(tmp, v)
     g_cmd_gates(tmp, v)
+
+
+def g_engine_scan(tmp: Path, v: Path, token: str) -> None:
+    """No gitleaks on the machine (ADR-0011): the engine's own scanner does the work and says so — never a silent PASS."""
+    keep = [d for d in os.environ.get("PATH", "").split(os.pathsep)
+            if d and not any((Path(d) / n).exists() for n in ("gitleaks", "gitleaks.exe"))]
+    no_gitleaks = {"GITLEAKS_BIN": None, "PATH": os.pathsep.join(keep), "USERPROFILE": str(tmp / "home-without-gitleaks"),
+                   "HOME": str(tmp / "home-without-gitleaks")}
+    w = fresh(tmp, "gates-engine-scan-ok", v)
+    git(w, "add", "-A")
+    rc, out = gate(w, "--only", "secrets", "--pre-commit", env=no_gitleaks)
+    expect(rc == 0 and re.search(r"PASS\s+secrets", out) is not None and "engine scanner" in out
+           and "gitleaks not installed" in out, "control: no gitleaks, clean staged files → PASS, and the line says the "
+           "engine's own scanner did it", out[-240:], kind="control")
+    w = fresh(tmp, "gates-engine-scan", v)
+    write(w / "config.py", f'GITHUB_TOKEN = "{token}"\n')
+    git(w, "add", "-A")
+    rc, out = gate(w, "--only", "secrets", "--pre-commit", env=no_gitleaks)
+    expect(rc == 1 and re.search(r"FAIL\s+secrets", out) is not None and "staged config.py:1 — github-token" in out
+           and token not in out, "seeded: no gitleaks, a token staged → FAIL naming file:line and kind, never the value",
+           out[-240:])
+    w = fresh(tmp, "gates-engine-scan-full", v)
+    write(w / "docs/setup-example.md", f'GITHUB_TOKEN = "{token}"  # PLACEHOLDER — put your own token in .env\n')
+    git(w, "add", "-A")
+    git(w, "commit", "-q", "-m", "fixture")
+    rc, out = gate(w, "--only", "secrets", env=no_gitleaks)
+    expect(rc == 0 and "working-tree file(s)" in out, "control: no gitleaks, a full run over a clean tree whose only "
+           "token sits on a line marked PLACEHOLDER (documentation) → PASS", out[-240:], kind="control")
+    write(w / "notes/local-config.py", f'GITHUB_TOKEN = "{token}"\n')
+    rc, out = gate(w, "--only", "secrets", env=no_gitleaks)
+    expect(rc == 1 and "working-tree notes/local-config.py:1" in out,
+           "seeded: no gitleaks, a token in an untracked file → the full run FAILs", out[-240:])
 
 
 def g_tasks_gate(tmp: Path, v: Path) -> None:
@@ -1275,7 +1366,7 @@ def g_wiring(tmp: Path, vault: Path) -> None:
     state.mkdir()
     env = {"CLAUDE_PROJECT_DIR": str(CODE), "EPISODIC_ROOT": str(v), "EPISODIC_STATE_DIR": str(state),
            "EPISODIC_AUTOSUMMARY": "0", "GUARD_ROOT": str(v), "GUARD_STATE_DIR": str(state), "GATE_ROOT": str(v),
-           "CONTEXT_ROOT": str(v)}
+           "CONTEXT_ROOT": str(v), "FIRSTRUN_ROOT": str(v)}
     payloads = {
         "SessionStart": {"session_id": SID, "source": "startup"},
         "PostCompact": {"session_id": SID, "trigger": "auto", "compact_summary": "wiring"},
@@ -1286,7 +1377,7 @@ def g_wiring(tmp: Path, vault: Path) -> None:
         "UserPromptSubmit": {"session_id": SID, "prompt": "გამარჯობა"},
         "Stop": {"session_id": SID, "stop_hook_active": False},
     }
-    expected = {"SessionStart": 2, "PostCompact": 1, "SessionEnd": 1, "PreToolUse": 1, "PostToolUse": 1,
+    expected = {"SessionStart": 3, "PostCompact": 1, "SessionEnd": 1, "PreToolUse": 1, "PostToolUse": 1,
                 "UserPromptSubmit": 1, "Stop": 1}
     for event, n in expected.items():
         cmds = [h["command"] for m in hooks.get(event, []) for h in m.get("hooks", []) if h.get("type") == "command"]
@@ -1295,6 +1386,10 @@ def g_wiring(tmp: Path, vault: Path) -> None:
             rc, out, err = check([bash, "-c", c], stdin=json.dumps(payloads[event]), env=env, timeout=60)
             ok = rc == 0 and (event != "SessionStart" or '"additionalContext"' in out)
             expect(ok, f"{event}: `{c.split('py.sh')[-1].strip().lstrip(chr(34)).strip()}` runs through py.sh (rc={rc})", err.strip()[-160:])
+    starts = [h.get("command", "") for m in hooks.get("SessionStart", []) if "startup" in m.get("matcher", "")
+              for h in m.get("hooks", [])]
+    expect(any(".claude/hooks/firstrun.py" in c for c in starts) and any("context_graph.py brief" in c for c in starts),
+           "a new session starts with the first-run setup and the stage brief (ADR-0011)", str(starts)[:160])
     rc, _, err = check([bash, "-c", 'bash "$CLAUDE_PROJECT_DIR/.claude/hooks/py.sh" .claude/hooks/no_such_hook.py'],
                        stdin="{}", env=env)
     expect(rc != 0, "seeded: a hook wired to a missing script fails loudly (non-zero)", f"rc={rc}")
@@ -1330,6 +1425,70 @@ def g_wiring(tmp: Path, vault: Path) -> None:
            (out + err)[-160:])
 
 
+def g_firstrun(tmp: Path) -> None:
+    print("== first run (.claude/hooks/firstrun.py: git repository, commit checks, tools — ADR-0011) ==")
+    gcfg = write(tmp / "fr-global.gitconfig", "[user]\n\tname = drill-global\n")
+    before = gcfg.read_text(encoding="utf-8")
+    no_gitleaks = str(tmp / "no-gitleaks.exe")
+
+    def project(name: str) -> Path:
+        p = tmp / name
+        write(p / ".githooks/pre-commit", "#!/usr/bin/env bash\nexit 0\n")
+        write(p / "intent.md", "# x\n")
+        return p
+
+    def first(root: Path, **env: str | None) -> tuple[int, str]:
+        rc, out, err = py(".claude/hooks/firstrun.py", env={"FIRSTRUN_ROOT": str(root), "GIT_CONFIG_GLOBAL": str(gcfg),
+                                                             "EPISODIC_NESTED": None, "GITLEAKS_BIN": no_gitleaks, **env})
+        return rc, out + err
+
+    def hooks_path(root: Path) -> str:
+        return run(["git", "-C", str(root), "config", "--local", "--get", "core.hooksPath"],
+                   env={"GIT_CONFIG_GLOBAL": str(gcfg)})[1].strip()
+
+    p = project("fr-new")
+    rc, out = first(p)
+    expect(rc == 0 and (p / ".git").is_dir() and hooks_path(p) == ".githooks" and "git init" in out
+           and "core.hooksPath" in out, "seeded: a folder that is not a repository → `git init`, the commit checks switched "
+           "on (core.hooksPath = .githooks) and the agent told", out[-240:])
+    expect(gcfg.read_text(encoding="utf-8") == before, "seeded: the person's global git config is never written",
+           gcfg.read_text(encoding="utf-8")[-120:])
+    expect("gitleaks" in out and "winget install Gitleaks.Gitleaks" in out,
+           "seeded: gitleaks missing → the agent is told, with the install command for the person's yes", out[-200:])
+    expect("user.email" in out and "git config --local user.email" in out,
+           "seeded: git knows no e-mail → the agent is told to ask the person and set it in this repository only", out[-200:])
+    rc, out = first(p)
+    expect(rc == 0 and out.strip() == "", "control: the next session start in the same project → silent (the missing tool "
+           "was already reported once)", out[-200:], kind="control")
+    q = project("fr-unhooked")
+    run(["git", "-C", str(q), "init", "-q"])
+    rc, out = first(q)
+    expect(hooks_path(q) == ".githooks" and "core.hooksPath" in out and "git init" not in out,
+           "seeded: a repository without the commit checks → switched on, no second `git init`", out[-200:])
+    r = project("fr-own-hooks")
+    run(["git", "-C", str(r), "init", "-q"])
+    run(["git", "-C", str(r), "config", "--local", "core.hooksPath", "my-hooks"])
+    rc, out = first(r)
+    expect(hooks_path(r) == "my-hooks" and "my-hooks" in out,
+           "seeded: the person's own core.hooksPath is kept and reported, never overwritten", out[-200:])
+    outer = tmp / "fr-outer"
+    outer.mkdir()
+    run(["git", "-C", str(outer), "init", "-q"])
+    inner = project("fr-outer/inner")
+    rc, out = first(inner)
+    expect(not (inner / ".git").exists() and hooks_path(outer) == "" and "სხვა git-რეპოს" in out,
+           "seeded: a project inside another repository → that repository is left alone and the agent told", out[-200:])
+    n = project("fr-nested")
+    rc, out = first(n, EPISODIC_NESTED="1")
+    expect(rc == 0 and out.strip() == "" and not (n / ".git").exists(),
+           "seeded: a nested model call (EPISODIC_NESTED=1) → nothing is set up", out[-160:])
+    known = write(tmp / "fr-known.gitconfig", "[user]\n\tname = drill\n\temail = drill@example.invalid\n")
+    k = project("fr-known")
+    rc, out = first(k, GIT_CONFIG_GLOBAL=str(known))
+    expect(rc == 0 and "git init" in out and "user.name" not in out and "user.email" not in out,
+           "control: git already knows the person's name and e-mail → no identity note", out[-200:], kind="control")
+
+
 def sl_stamp(minutes_ago: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat().replace("+00:00", "Z")
 
@@ -1362,12 +1521,16 @@ def plant_bash(folder: Path) -> Path:
 
 
 def g_engine_statusline(tmp: Path) -> None:
-    print("== engine status line (.claude/hooks/statusline.py: the owner's line + when the prompt cache expires) ==")
+    print("== engine status line (.claude/hooks/statusline.py: the owner's line + the project's stage + when the prompt "
+          "cache expires) ==")
     state = tmp / "sl-engine-state"
     state.mkdir()
     prices = write(tmp / "sl-prices.toml", 'source = "drill"\nwrite_5m = 1.25\nwrite_1h = 2.0\n\n'
                    '[models.claude-drill]\ninput = 1.0\noutput = 10.0\ncache_read = 0.1\n')
-    base_env = {"ENGINE_STATUSLINE_BASE": "", "CLAUDE_STATUSLINE_STATE_DIR": str(state), "CACHE_PRICES": str(prices)}
+    stage_vault = make_vault(tmp / "sl-vault")
+    edit(stage_vault / "intent.md", "status: draft", "status: accepted")
+    base_env = {"ENGINE_STATUSLINE_BASE": "", "CLAUDE_STATUSLINE_STATE_DIR": str(state), "CACHE_PRICES": str(prices),
+                "CONTEXT_ROOT": str(stage_vault)}
 
     def show(transcript: Path | None, sid: str = "sl-drill", stdin: str | None = None, cache: dict | None = None,
              cwd: Path | None = None, script: Path | None = None, **env: str) -> tuple[int, str]:
@@ -1383,6 +1546,13 @@ def g_engine_statusline(tmp: Path) -> None:
     rc, out = show(sl_transcript(t / "warm.jsonl", 5, 4, 400_000))
     expect(rc == 0 and "ქეში თბილია" in out and "❄" not in out, "control: asked 5 minutes ago on a 1-hour cache → warm",
            out[-160:], kind="control")
+    lines = out.split("\n")
+    expect(rc == 0 and len(lines) >= 3 and "ეტაპი 2/5" in lines[1] and "/approve spec 0001" in lines[1] and "ქეში" in lines[2],
+           "seeded: the line under the owner's names the project's stage and the next command (2/5 → /approve spec 0001), "
+           "the cache line follows", out[-240:])
+    rc, out = show(sl_transcript(t / "no-project.jsonl", 5, 4, 100_000), CONTEXT_ROOT=str(tmp / "sl-no-project"))
+    expect(rc == 0 and "ეტაპი" not in out and "ქეში თბილია" in out,
+           "control: a folder without intent.md → no stage line, the rest unchanged", out[-160:], kind="control")
     rc, out = show(sl_transcript(t / "soon.jsonl", 55, 54, 400_000))
     expect("ქეში იწურება" in out, "seeded: asked 55 minutes ago → the cache expires within 10 minutes", out[-160:])
     rc, out = show(sl_transcript(t / "long-answer.jsonl", 58, 2, 400_000, first_min=45))
@@ -1496,7 +1666,7 @@ def g_statusline(tmp: Path, path: str | None) -> None:
 
 
 GROUPS = ["graph", "approve", "guard", "sentinel", "observe", "episodic", "stop", "gates", "orchestration", "wiring",
-          "statusline"]
+          "firstrun", "statusline"]
 
 
 def main() -> int:
@@ -1543,6 +1713,8 @@ def main() -> int:
             g_orchestration(tmp, approved)
         if "wiring" in want:
             g_wiring(tmp, vault)
+        if "firstrun" in want:
+            g_firstrun(tmp)
         if "statusline" in want:
             g_engine_statusline(tmp)
             if a.statusline:

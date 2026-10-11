@@ -199,10 +199,63 @@ def untracked_files(root: Path) -> list[Path] | None:
     return [root / n for n in r.stdout.decode("utf-8", "replace").split("\0") if n and (root / n).is_file()]
 
 
+SCAN_MAX_BYTES = 2_000_000
+
+
+def staged_blobs(root: Path) -> list[tuple[str, bytes]] | None:
+    """(path, staged content) of every file the next commit adds or changes; None if git cannot say."""
+    r = subprocess.run(["git", "-C", str(root), "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMR"],
+                       capture_output=True, timeout=30)
+    if r.returncode != 0:
+        return None
+    out = []
+    for name in (n for n in r.stdout.decode("utf-8", "replace").split("\0") if n):
+        blob = subprocess.run(["git", "-C", str(root), "show", f":{name}"], capture_output=True, timeout=30)
+        if blob.returncode != 0:
+            return None
+        out.append((name, blob.stdout))
+    return out
+
+
+def engine_scan(root: Path, files: list[Path], pre_commit: bool) -> Result:
+    """gitleaks is not installed (ADR-0011): the engine's own scanner — tools/redact.py, the list the sentinel uses —
+    reads the same files. It has no entropy threshold and does not read git history; the result line says so."""
+    label = "staged" if pre_commit else "working-tree"
+    if pre_commit:
+        blobs = staged_blobs(root)
+        if blobs is None:
+            return Result("secrets", "INCONCLUSIVE", "gitleaks not installed and git could not list the staged files — "
+                                                     "nothing was scanned")
+    else:
+        blobs = []
+        for p in files:
+            try:
+                blobs.append((rel(root, p), p.read_bytes()))
+            except OSError as e:
+                return Result("secrets", "INCONCLUSIVE", f"engine scanner could not read {rel(root, p)}: {e}")
+    found, scanned, skipped = [], 0, 0
+    for name, data in blobs:
+        if b"\0" in data[:8192] or len(data) > SCAN_MAX_BYTES:
+            skipped += 1
+            continue
+        scanned += 1
+        text = data.decode("utf-8", "replace")
+        for kind, start, _end in redact.find_secrets(text, skip_decoys=True):
+            found.append(f"{label} {name}:{text.count(chr(10), 0, start) + 1} — {kind}")  # never the value
+    note = f", {skipped} binary or over 2 MB NOT scanned" if skipped else ""
+    return Result("secrets", "FAIL" if found else "PASS",
+                  f"engine scanner (gitleaks not installed — no entropy threshold, git history not scanned): "
+                  f"{scanned} {label} file(s){note}", found)
+
+
 def gate_secrets(root: Path, files: list[Path], pre_commit: bool = False, **_) -> Result:
     gl = find_gitleaks()
     if not gl:
-        return Result("secrets", "INCONCLUSIVE", "gitleaks not found (GITLEAKS_BIN, PATH, ~/bin) — nothing was scanned")
+        explicit = os.environ.get("GITLEAKS_BIN")
+        if explicit:  # a named gitleaks that is not there is a broken setting, not a missing tool
+            return Result("secrets", "INCONCLUSIVE", f"GITLEAKS_BIN names {explicit}, which does not exist — "
+                                                     "nothing was scanned")
+        return engine_scan(root, files, pre_commit)
     # gitleaks' git modes never read an untracked file, so the full run also scans those one by one
     # (`gitleaks dir` takes exactly one path). The commit itself is guarded by the staged scan.
     scans = [("staged", ["git", "--pre-commit", "--staged", str(root)])]

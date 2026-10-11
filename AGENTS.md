@@ -6,13 +6,16 @@ Georgian, and let a machine check prove it — assurance is not evidence.
 
 ## What this project is
 
-A new project built on the **agent foundation kit**. Phase: **F0** — no product code yet. The kit brings
-the engine: memory layers, the context graph, the harness (permissions, guard, sentinel), gates with a
-drill, the observatory with cost and prompt-cache measurement, the status line, dormant maker–checker
-orchestration, and the intent → spec → plan → code → gates → review loop. What the product does, for whom
-and where it must stop is the owner's to define in `intent.md` (draft until `/approve intent`; the
-interview starts from its §7). Domain facts live in `docs/domain/`, each dated and sourced — re-verify a
-fact before building on it, and never present model memory as a verified fact (a law, a price, a rule).
+A new project built on the **agent foundation kit**. It starts from the person's idea, with no setup step —
+the engine sets itself up on the first session start (ADR-0011). The kit brings the engine: memory layers, the
+context graph, the harness (permissions, guard, sentinel), gates with a drill, the observatory with cost and
+prompt-cache measurement, the status line, dormant maker–checker orchestration, and the intent → spec → plan →
+code → gates → review loop. What the product does, for whom and where it must stop is the owner's to define in
+`intent.md`: their idea goes into §1 at once, the interview fills the rest (draft until `/approve intent`).
+Where the project stands and what comes next: the stage block at every session start
+(`py -3.12 tools/context_graph.py stage`). Domain facts live in `docs/domain/`, each dated and sourced —
+re-verify a fact before building on it, and never present model memory as a verified fact (a law, a price, a
+rule).
 
 ## Repository map
 
@@ -27,12 +30,13 @@ fact before building on it, and never present model memory as a verified fact (a
 | `docs/specs/`, `docs/plans/` | feature specifications and implementation plans |
 | `docs/domain/` | verified domain facts, each dated and sourced |
 | `memory/` | episodes, PROPOSALS, LESSONS, the owner's approvals ledger — map: `memory/README.md` |
-| `tools/context_graph.py` | the knowledge graph: `build`, `check`, `query <id>`, `pending` |
+| `tools/context_graph.py` | the knowledge graph: `build`, `check`, `query <id>`, `pending`, `stage` (where the project stands — ADR-0011) |
 | `tools/approve.py` | the owner's approval — never run it yourself |
 | `tools/gates/` | deterministic gates (`gate.py`, `gates.toml`) and their drill |
 | `tools/observe.py` | the observatory: what agents did, read from Claude Code's transcripts (`/observatory`) |
 | `tools/cache_cost.py`, `tools/model_prices.toml` | what the sessions cost: prompt-cache use, rebuilds and their causes, at API list prices (ADR-0010) |
-| `.claude/hooks/statusline.py` | the engine's status line: the owner's own line plus when the prompt cache expires (ADR-0010) |
+| `.claude/hooks/statusline.py` | the engine's status line: the owner's own line, the project's stage and when the prompt cache expires (ADR-0010, ADR-0011) |
+| `.claude/hooks/firstrun.py` | the first session start in a new project: git repository, commit checks, tool check (ADR-0011) |
 | `.claude/agents/` | subagents: `spec-reviewer`, `verifier`, the three critic lenses, `refuter` |
 | `orchestration/` | maker–checker loops — dormant; the code still holds the earlier version (Fable↔Astra, Opus↔Sol), ADR-0005 moves stage I to Claude models only |
 | `evals/` | behaviour evals (level-2 gates, once the agent exists) |
@@ -49,6 +53,11 @@ fact before building on it, and never present model memory as a verified fact (a
 6. Review against `REVIEW.md` (ChatGPT Sol when orchestration is enabled; max 2 rounds).
 7. The owner sees the result working.
 
+These steps are `plan.md`'s stages F1–F5 (intent → spec → architecture ADR → plan and build → show).
+`py -3.12 tools/context_graph.py stage` reads the documents' statuses and names the current stage and the next
+step — it stores nothing and adds no stage of its own (ADR-0011). A new project starts from the person's idea,
+with no setup step: see CLAUDE.md.
+
 Architectural choices are recorded as ADRs (`proposed`) and decided by the owner. **No agent approves
 anything.** An accepted ADR is binding; changing it means a new ADR that supersedes it.
 
@@ -63,6 +72,7 @@ py -3.12 tools/gates/drill.py             # break every check on purpose; all mu
 py -3.12 tools/context_graph.py check     # links, frontmatter, statuses, approval chain, ledger
 py -3.12 tools/context_graph.py query <id-or-stem>
 py -3.12 tools/context_graph.py pending   # documents waiting for the owner
+py -3.12 tools/context_graph.py stage     # where the project stands (F1–F5) and what comes next
 py -3.12 orchestration/run.py status
 ```
 

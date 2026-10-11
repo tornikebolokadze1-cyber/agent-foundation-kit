@@ -4,6 +4,7 @@ type: adr
 title: ქეშირება და ხარჯი — გაზომვა ძრავში, statusline ნაგულისხმევად, სესიისა და subagent-ების ჩვევები
 status: proposed
 date: 2026-10-10
+scope: engine
 deciders: მფლობელი (`/approve`); შემთავაზებელი — Claude Opus 5.5
 related:
   - "[[intent]]"

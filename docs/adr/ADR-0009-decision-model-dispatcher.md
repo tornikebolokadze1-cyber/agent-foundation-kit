@@ -4,6 +4,7 @@ type: adr
 title: Decision model — დისპეჩერი (TypeSafe Jev, OpenRouter-ით) გვთავაზობს, რომელ Claude-მოდელს გადაეცეს დავალება; ჩადებული და გამორთული
 status: proposed
 date: 2026-10-09
+scope: engine
 deciders: მფლობელი (`/approve`); შემთავაზებელი — Claude Opus 5.5
 related:
   - "[[intent]]"

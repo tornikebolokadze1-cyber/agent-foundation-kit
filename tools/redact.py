@@ -40,7 +40,7 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("telegram-bot-token", re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_-]{30,}")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
     ("bearer-token", re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+(?P<secret>[A-Za-z0-9._~+/-]{20,}=*)")),
-    # credentials embedded in a URL (`postgres://user:pass@host`): only the password group is hidden.
+    # credentials embedded in a URL — the password between `user:` and `@host`: only the password group is hidden.
     ("url-credential", re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:(?P<secret>[^\s/:@]+)@")),
 ]
 

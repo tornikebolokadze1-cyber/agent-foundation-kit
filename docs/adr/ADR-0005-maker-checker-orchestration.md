@@ -4,6 +4,7 @@ type: adr
 title: ორკესტრაცია ორ ეტაპად — ჯერ მხოლოდ Claude (Opus 5.5 ↔ Sonnet 5.5, რუტინა — Haiku 5.5), შემდეგ Fable, GPT და სხვები; ჩადებული და გამორთული
 status: proposed
 date: 2026-09-18
+scope: engine
 revised: 2026-10-09
 deciders: მფლობელი (`/approve`); შემთავაზებელი — Claude Opus 5 (2026-09-18), გადამუშავება — Claude Opus 5.5 (2026-10-09)
 related:

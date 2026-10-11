@@ -82,7 +82,7 @@ enabled = true
 builtin = "secrets"
 pre_commit = true
 stop = false
-what = "gitleaks finds no credential (staged files before a commit, the working tree otherwise)"
+what = "gitleaks finds no credential (staged files before a commit, the working tree otherwise); without gitleaks the engine's own scanner, labelled as such (ADR-0011)"
 
 [[gate]]
 id = "instructions"

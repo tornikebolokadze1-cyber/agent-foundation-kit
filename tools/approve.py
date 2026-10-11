@@ -46,12 +46,6 @@ USAGE = """გამოყენება:
 
 TARGET = {"intent": "accepted", "spec": "approved", "plan": "approved", "adr": "accepted"}
 FROM = cg.PENDING_STATUSES  # the owner approves only what is waiting for them
-NEXT_HINT = {
-    "intent": "ახლა შეიძლება სპეციფიკაციის შედგენა: `/spec`.",
-    "spec": "ახლა შეიძლება ამ სპეციფიკაციის გეგმის შედგენა: `/feature-plan`.",
-    "plan": "გეგმა დამტკიცდა — აგენტს შეუძლია შესრულება დაიწყოს (status → in-progress).",
-    "adr": "გადაწყვეტილება ჩაიწერა; ახლა მასზე დაყრდნობა შეიძლება.",
-}
 
 
 def root_dir() -> Path:
@@ -197,12 +191,22 @@ def apply(g: cg.Graph, changes: list[tuple[cg.Node, str]], note: str, new_doc: c
 
 
 def list_pending(g: cg.Graph) -> str:
-    pend = cg.pending(g)
-    if not pend:
-        return "ამჟამად არაფერი ელოდება შენს დამტკიცებას."
-    lines = ["შენს დამტკიცებას ელოდება:"]
+    pend, eng = cg.pending(g), cg.pending(g, engine=True)
+    lines = ["შენს დამტკიცებას ელოდება:"] if pend else ["პროექტში ამჟამად არაფერი ელოდება შენს დამტკიცებას."]
     lines += [f"  {cg.approve_hint(n):22} {n.id} — {n.title} (`{n.status}`)" for n in pend]
+    if eng:
+        lines.append(f"ძრავის საკუთარი ADR-ები ({len(eng)}, `scope: engine`) პროექტის ეტაპებს არ აჩერებს — ისინი ძრავის "
+                     f"ავტორის გადასაწყვეტია: {', '.join(n.id for n in eng)}.")
     return "\n".join(lines)
+
+
+def next_step(root: Path) -> str:
+    """What comes after this decision — read from the documents, as the SessionStart brief reads it (ADR-0011)."""
+    try:
+        st = cg.project_stage(cg.load(root))
+    except Exception as e:  # the decision itself is already recorded; only this hint failed
+        return f"(შემდეგი ეტაპი ვერ განისაზღვრა: {type(e).__name__})"
+    return f"➡ ახლა: ეტაპი {st.number}/5 · {st.name} — {st.step}.\n   {st.person}."
 
 
 def main(argv: list[str]) -> int:
@@ -244,8 +248,7 @@ def main(argv: list[str]) -> int:
     lines = [f"✅ {doc.id} „{doc.title}“ — {doc.status} → {target} ({verb}). ჩაიწერა memory/approvals.md-ში."]
     for node, st in changes[1:]:
         lines.append(f"   {node.id} → {st} (ჩაანაცვლა {doc.id}).")
-    if action != "reject":
-        lines.append(NEXT_HINT[kind])
+    lines.append(next_step(root))
     print("\n".join(lines))
     return 0
 

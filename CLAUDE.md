@@ -4,18 +4,29 @@
 
 ## Claude Code specifics
 
+### Start from the idea (ADR-0011)
+The person runs no setup: on the first session start `.claude/hooks/firstrun.py` makes the folder a git repository
+and switches on the commit checks by itself. A message that describes something to build — a website, a game, an
+agent, an automation, anything — IS the start: run `/intent`, write the idea into intent.md §1 at once in the
+person's own words (source **მფლობელი**, with the date) and begin the interview with one question. Never ask them to
+read the README, run a setup step or approve the engine's own ADRs (`scope: engine` — the engine author's).
+The stages are the existing loop (ADR-0001; `plan.md` F1–F5): 1 intent → 2 spec → 3 architecture ADR → 4 plan and
+build → 5 show. The brief's stage block says where the project stands and what comes next; follow it and tell the
+person the next step in plain words, the command exactly.
+
 ### Working memory arrives by itself
-At every session start and after every compaction, the SessionStart hooks inject: progress.md "ახლა",
-plan.md's current phase, tasks/todo.md "now / next", this session's episode path, the last closed session, open proposals,
-sessions that need reconciling, the compaction count, and the context-graph brief (errors + what waits
-for the owner). Start from it — do not re-derive it. If the brief shows graph errors, fix them first.
+At every session start and after every compaction, the SessionStart hooks inject: the project's stage and next
+step, progress.md "ახლა", plan.md's current phase, tasks/todo.md "now / next", this session's episode path, the last
+closed session, open proposals, sessions that need reconciling, the compaction count, and the context-graph brief
+(errors + what waits for the owner). Start from it — do not re-derive it. If the brief shows graph errors, fix them
+first.
 
 Claude Code compacts the conversation by itself when the context fills. The status line shows `↻N` = compactions in this
 session; at 3 it turns red — a summary of a summary is no longer reliable memory: run `/session-close`,
 then recommend a new terminal or `/clear`. The same status line (`.claude/hooks/statusline.py`, ADR-0010) keeps
-the owner's own line and adds the prompt cache — `♻ … თბილია ~HH:MM-მდე`, `იწურება`, `❄ ცივია`. Cold with a large
-context means the next message rewrites the whole conversation: for a new topic recommend `/session-close` and a
-new session.
+the owner's own line and adds the project's stage (`🧭 ეტაპი N/5 · … → next command`, ADR-0011) and the prompt cache —
+`♻ … თბილია ~HH:MM-მდე`, `იწურება`, `❄ ცივია`. Cold with a large context means the next message rewrites the whole
+conversation: for a new topic recommend `/session-close` and a new session.
 
 ### Project skills
 
@@ -57,6 +68,10 @@ and anything Georgian (L-006); Opus for checks. Reading-and-summarising moves to
 ### Talking to the owner
 Georgian, connected prose, simple words; gloss a technical term the first time (e.g. „gate (მანქანური
 შემოწმება)"). Show results, not promises; say plainly what was not verified.
+Georgian quality — the engine carries its own rule and never leans on anyone's global setup: correct cases
+(ბრუნვები) and subject–verb agreement; no calque from English („მოდი შევამოწმო" → „ერთი წამი, ვამოწმებ";
+„მე ამას გავაკეთებ" → „ახლა გავაკეთებ"); English only for a term Georgian has no natural word for; re-read every
+Georgian answer once before sending. Georgian a person reads comes from Sonnet-class or better, never Haiku (L-006).
 
 ## Lessons (curated, always loaded)
 

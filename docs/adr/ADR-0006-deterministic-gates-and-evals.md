@@ -4,6 +4,7 @@ type: adr
 title: დეტერმინისტული კარიბჭეები და evals — დონეები 0–3, დრილი, SKIP ≠ PASS
 status: proposed
 date: 2026-09-18
+scope: engine
 deciders: მფლობელი (`/approve`); შემთავაზებელი — Claude Opus 5
 related:
   - "[[tools/gates/README]]"

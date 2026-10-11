@@ -4,6 +4,7 @@ type: adr
 title: მეხსიერების ფენები და სესიის შეჯამების განაწილება
 status: proposed
 date: 2026-09-18
+scope: engine
 deciders: მფლობელი (`/approve`); შემთავაზებელი — Claude Opus 5
 related:
   - "[[memory/README]]"

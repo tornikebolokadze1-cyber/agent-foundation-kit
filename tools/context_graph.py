@@ -12,7 +12,8 @@ the agent, and checks it mechanically.
                                                        issues that involve those files
   py -3.12 tools/context_graph.py query ID [--depth N] one node's neighbourhood (ID or file stem)
   py -3.12 tools/context_graph.py pending              documents waiting for the owner's /approve
-  py -3.12 tools/context_graph.py brief                SessionStart hook: rebuild + short brief
+  py -3.12 tools/context_graph.py stage                where the project stands (F1–F5) and what comes next
+  py -3.12 tools/context_graph.py brief                SessionStart hook: rebuild + stage + short brief
 
 Exit codes (check): 0 = no errors, 1 = errors found, 2 = inconclusive (nothing
 was scanned, or the root is wrong) — a check that saw nothing must not pass.
@@ -533,6 +534,10 @@ def check(g: Graph) -> list[Issue]:
                 issues.append(Issue("error", "FM-ID", n.path, 1, f"id {fm['id']!r} does not match {pat}"))
             elif not n.stem.startswith(str(fm["id"])):
                 issues.append(Issue("error", "FM-ID", n.path, 1, f"file name must start with its id {fm['id']!r}"))
+        if typ == "adr" and fm.get("scope") not in (None, "") and fm.get("scope") not in SCOPES:
+            issues.append(Issue("error", "SCOPE", n.path, 1,
+                                f"scope {fm.get('scope')!r} is not valid for an adr (allowed: {', '.join(SCOPES)}; "
+                                "none = project) — an engine ADR stays out of the project's stages (ADR-0011)"))
         if fm.get("id"):
             ids.setdefault(str(fm["id"]), []).append(n.path)
 
@@ -661,9 +666,15 @@ def filter_issues(issues: list[Issue], files: list[str], root: Path) -> list[Iss
 
 
 # ── Views ────────────────────────────────────────────────────────────────────
-def pending(g: Graph) -> list[Node]:
+def is_engine(n: Node) -> bool:
+    """An engine ADR (`scope: engine`) is the engine's own rule — the engine author decides it, not the project."""
+    return n.type == "adr" and str((n.fm or {}).get("scope") or "") == "engine"
+
+
+def pending(g: Graph, engine: bool = False) -> list[Node]:
+    """Documents waiting for the owner's /approve: the project's own, or (engine=True) the engine's ADRs."""
     out = [n for n in g.nodes.values() if not n.foreign and n.type in PENDING_STATUSES
-           and n.status in PENDING_STATUSES[n.type]]
+           and n.status in PENDING_STATUSES[n.type] and is_engine(n) == engine]
     order = {"intent": 0, "spec": 1, "plan": 2, "adr": 3}
     return sorted(out, key=lambda n: (order.get(n.type, 9), n.id))
 
@@ -672,6 +683,122 @@ def approve_hint(n: Node) -> str:
     if n.type == "intent":
         return "/approve intent"
     return f"/approve {n.type} {n.id.split('-')[-1]}"
+
+
+# ── Stage conductor (ADR-0011) ───────────────────────────────────────────────
+# The stages are not new: they are ADR-0001's loop (intent → spec → plan → code → gates → review) and plan.md's
+# phases F1–F5. The conductor stores nothing — each call reads the same statuses the graph reads and says where the
+# project stands and what comes next, for the person and for the agent.
+STAGES = {1: "განზრახვა", 2: "სპეციფიკაცია", 3: "არქიტექტურა", 4: "გეგმა და აშენება", 5: "ჩვენება და პილოტი"}
+SCOPES = ("engine", "project")
+PLACEHOLDER_RE = re.compile(r"^(?:_.*_|<!--.*-->)$")  # the template's own lines in an empty intent section
+
+
+@dataclass
+class Stage:
+    number: int
+    short: str         # the status line's text — a few words
+    step: str          # where the project stands, one sentence
+    person: str        # what the person does next
+    agent: str         # what the agent does next
+    command: str = ""  # the person's exact command, when the next move is theirs
+    doc: str = ""      # the document in focus (vault path)
+    no_idea: bool = False  # intent.md's §1 is still the template: nothing to approve yet
+
+    @property
+    def name(self) -> str:
+        return STAGES[self.number]
+
+    def status_line(self) -> str:
+        return f"ეტაპი {self.number}/5 · {self.name} — {self.short}" + (f" → {self.command}" if self.command else "")
+
+    def block(self) -> str:
+        where = f" (`{self.doc}`)" if self.doc else ""
+        path = " → ".join(f"{k} {v}" for k, v in STAGES.items())
+        return "\n".join([
+            "## ეტაპი — სად დგას პროექტი (`py -3.12 tools/context_graph.py stage`, ADR-0011)",
+            f"- **ეტაპი {self.number}/5 · {self.name}** — {self.step}{where}",
+            f"- ადამიანს: {self.person}",
+            f"- აგენტს: {self.agent}",
+            f"- გზა (ADR-0001-ის ციკლი, plan.md-ის F1–F5): {path}. ადამიანს ეტაპი ჩვეულებრივი სიტყვებით უთხარი, "
+            "ბრძანება — ზუსტად.",
+        ])
+
+
+def idea_written(path: Path) -> bool:
+    """True when intent.md's §1 holds more than the template's `_…_` placeholder lines."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    m = re.search(r"^## 1\b[^\n]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+    if not m:
+        return True  # no §1 heading: a hand-made intent — its draft status still sends it through the interview
+    return any(ln.strip() and not PLACEHOLDER_RE.match(ln.strip()) for ln in m.group(1).splitlines())
+
+
+def _review(doc: Node, fix: str) -> tuple[str, str]:
+    cmd = approve_hint(doc)
+    return (f"წაიკითხე `{doc.path}`; თუ ეთანხმები — `{cmd}`, თუ არა — თქვი, რა შეიცვალოს",
+            f"{doc.id}: შეასწორე ადამიანის შენიშვნების მიხედვით ({fix}); დამტკიცება მხოლოდ მისი `{cmd}`-ია")
+
+
+def project_stage(g: Graph) -> Stage:
+    """Where the project stands, read from intent.md, the newest spec, the project's ADRs and that spec's plan."""
+    intent = g.nodes.get("intent.md")
+    if intent is None or intent.status != "accepted":
+        if intent is None or not idea_written(g.root / intent.path):
+            return Stage(1, "დაწერე შენი იდეა", "იდეა ჯერ არ არის ჩაწერილი",
+                         "დაწერე შენი იდეა ჩვეულებრივი სიტყვებით: რა გინდა შექმნა და ვისთვის",
+                         "როცა ადამიანი იდეას დაწერს — `/intent`: ჩაწერე ის intent.md-ის §1-ში მისივე სიტყვებით და "
+                         "დაიწყე ინტერვიუ, ერთი კითხვა ერთ ჯერზე. setup-ს ნუ სთხოვ — ძრავა უკვე აწყობილია",
+                         doc="intent.md", no_idea=True)
+        return Stage(1, "ინტერვიუ", "ინტერვიუ — განზრახვა იწერება",
+                     "უპასუხე კითხვებს; როცა intent.md შენს აზრს სწორად ასახავს — `/approve intent`",
+                     "გააგრძელე `/intent`-ის ინტერვიუ (§7-ის ღია კითხვები); როცა ღია კითხვა აღარ დარჩება, მოკლედ "
+                     "აჩვენე, რა ჩაიწერა, და შესთავაზე `/approve intent`", "/approve intent", "intent.md")
+    specs = sorted((n for n in g.nodes.values() if n.type == "spec" and not n.foreign and n.status != "superseded"),
+                   key=lambda n: n.id)
+    if not specs:
+        return Stage(2, "აგენტი წერს სპეციფიკაციას", "განზრახვა დამტკიცებულია — სპეციფიკაცია ჯერ არ არის",
+                     "დაელოდე — აგენტი წერს სპეციფიკაციას: რა უნდა შეეძლოს შედეგს, შემოწმებადი კრიტერიუმებით",
+                     "დაწერე პირველი სპეციფიკაცია: `/spec`")
+    spec = specs[-1]
+    if spec.status != "approved":
+        person, agent = _review(spec, "`/spec`; წარდგენამდე — spec-reviewer")
+        return Stage(2, f"{spec.id} გელოდება", f"{spec.id} შენს გადახედვას ელოდება", person, agent,
+                     approve_hint(spec), spec.path)
+    adrs = [n for n in g.nodes.values() if n.type == "adr" and not n.foreign and not is_engine(n)]
+    if not any(n.status == "accepted" for n in adrs):
+        proposed = sorted((n for n in adrs if n.status == "proposed"), key=lambda n: n.id)
+        if proposed:
+            person, agent = _review(proposed[0], "`/adr`")
+            return Stage(3, f"{proposed[0].id} გელოდება", f"{proposed[0].id} — რით აშენდეს — შენს გადაწყვეტილებას "
+                         "ელოდება", person, agent, approve_hint(proposed[0]), proposed[0].path)
+        return Stage(3, "აგენტი სტეკს გთავაზობს", f"{spec.id} დამტკიცებულია — ჯერ არ არის გადაწყვეტილი, რით აშენდეს",
+                     "აგენტი შემოგთავაზებს, რით აშენდეს (ტექნოლოგია, ჰოსტინგი) — აირჩიე",
+                     "შესთავაზე 2–3 ვარიანტი რეკომენდაციით; არჩეული ჩაწერე `/adr`-ით (`scope`-ის გარეშე — ეს "
+                     "პროექტის გადაწყვეტილებაა)")
+    plans = sorted((n for n in g.nodes.values() if n.type == "plan" and not n.foreign
+                    and any(t.path == spec.path for t in _rel_targets(g, n, "spec"))), key=lambda n: n.id)
+    if not plans:
+        return Stage(4, "აგენტი გეგმას ადგენს", f"{spec.id}-ს გეგმა ჯერ არ აქვს",
+                     "დაელოდე — აგენტი გეგმას ადგენს: რა ამოცანებად აშენდება და როგორ შემოწმდება",
+                     f"`/feature-plan` — გეგმა {spec.id}-ზე")
+    plan = plans[-1]
+    if plan.status == "draft":
+        person, agent = _review(plan, "`/feature-plan`")
+        return Stage(4, f"{plan.id} გელოდება", f"{plan.id} შენს გადახედვას ელოდება", person, agent,
+                     approve_hint(plan), plan.path)
+    if plan.status != "done":
+        return Stage(4, f"აშენება — {plan.id}", f"აშენება — {plan.id} სრულდება",
+                     "დაელოდე — აგენტი აშენებს ამოცანა-ამოცანა და შედეგს გაჩვენებს",
+                     f"შეასრულე {plan.id} ამოცანა-ამოცანა (`/feature-plan`, ნაწილი B): ტესტი, კოდი, gate-ები, commit; "
+                     "ბოლოს აჩვენე შედეგი", doc=plan.path)
+    return Stage(5, "ნახე შედეგი", f"{plan.id} დასრულებულია",
+                 "ნახე შედეგი; ახალი იდეა ან ცვლილება — უბრალოდ დაწერე",
+                 "აჩვენე შედეგი ცოცხლად (სად გახსნას, რა ნახოს, რა სცადოს); ახალი ფუნქცია ან ცვლილება — ახალი "
+                 "`/spec`", doc=plan.path)
 
 
 def to_json(g: Graph) -> dict:
@@ -704,6 +831,10 @@ def context_map(g: Graph, issues: list[Issue]) -> str:
     ]
     pend = pending(g)
     lines += [f"- {n.id} — {n.title} (`{n.status}`) → `{approve_hint(n)}`" for n in pend] or ["- არაფერი"]
+    eng = pending(g, engine=True)
+    if eng:
+        lines += ["", "## ძრავის გადაწყვეტილებები (`scope: engine` — პროექტის ეტაპებს არ აჩერებს)", ""]
+        lines += [f"- {n.id} — {n.title} (`{n.status}`) → `{approve_hint(n)}`" for n in eng]
     for typ in ("intent", "roadmap", "progress", "spec", "plan", "adr", "domain", "memory", "episode"):
         group = sorted((n for n in g.nodes.values() if n.type == typ and not n.foreign), key=lambda n: n.path)
         if typ == "episode":
@@ -772,8 +903,13 @@ def query(g: Graph, ident: str, depth: int) -> str:
 
 def brief(g: Graph, issues: list[Issue]) -> str:
     errors = [i for i in issues if i.level == "error"]
-    pend = pending(g)
+    stage = project_stage(g)
+    # an intent whose §1 is still the template has nothing in it to approve yet
+    pend = [n for n in pending(g) if not (stage.no_idea and n.type == "intent")]
+    eng = pending(g, engine=True)
     lines = [
+        stage.block(),
+        "",
         "## კონტექსტის გრაფი (tools/context_graph.py)",
         f"- {len(g.nodes)} კვანძი, {len(g.edges())} კავშირი, შეცდომა: {len(errors)}"
         + (" — გაასწორე, სანამ სხვა სამუშაოს დაიწყებ:" if errors else ""),
@@ -784,6 +920,10 @@ def brief(g: Graph, issues: list[Issue]) -> str:
     if pend:
         lines.append("- მფლობელის დასამტკიცებელი (შეახსენე; თავად ვერ დაამტკიცებ):")
         lines += [f"  - {n.id} — {n.title} (`{n.status}`) → `{approve_hint(n)}`" for n in pend[:10]]
+    if eng:
+        lines.append(f"- ძრავის საკუთარი ADR-ები (`scope: engine`): {len(eng)} `proposed` — პროექტის ეტაპებს არ აჩერებს; "
+                     "ისინი ძრავის ავტორის გადასაწყვეტია და ახალი პროექტის მფლობელს დასამტკიცებლად არ ეძლევა "
+                     "(`py -3.12 tools/context_graph.py pending`)")
     lines.append("- ორიენტაცია: `memory/graph/CONTEXT-MAP.md`; ერთი კვანძის სამეზობლო: "
                  "`py -3.12 tools/context_graph.py query <id>`")
     return "\n".join(lines)
@@ -802,6 +942,7 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("ident")
     q.add_argument("--depth", type=int, default=1)
     sub.add_parser("pending")
+    sub.add_parser("stage")
     sub.add_parser("brief")
     a = ap.parse_args(argv)
     root = Path(a.root).resolve() if a.root else default_root().resolve()
@@ -837,11 +978,18 @@ def main(argv: list[str] | None = None) -> int:
         print(query(g, a.ident, max(1, a.depth)))
         return 0
     if a.cmd == "pending":
-        pend = pending(g)
+        pend, eng = pending(g), pending(g, engine=True)
         for n in pend:
             print(f"{n.id:10} {n.status:9} {approve_hint(n):22} {n.title}")
         if not pend:
-            print("nothing is waiting for the owner")
+            print("nothing in the project is waiting for the owner")
+        if eng:
+            print("\nengine decisions (scope: engine) — the engine author's, they do not hold up the project's stages:")
+            for n in eng:
+                print(f"{n.id:10} {n.status:9} {approve_hint(n):22} {n.title}")
+        return 0
+    if a.cmd == "stage":
+        print(project_stage(g).block())
         return 0
     if a.cmd == "brief":
         if os.environ.get("EPISODIC_NESTED") == "1":

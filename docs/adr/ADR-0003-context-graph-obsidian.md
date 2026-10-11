@@ -4,6 +4,7 @@ type: adr
 title: კონტექსტის გრაფი — ერთი წყარო, ორი ხედი, ერთი შემოწმება (Obsidian + context_graph.py)
 status: proposed
 date: 2026-09-18
+scope: engine
 deciders: მფლობელი (`/approve`); შემთავაზებელი — Claude Opus 5
 related:
   - "[[ADR-0002-memory-layers-and-session-distribution]]"

@@ -4,6 +4,7 @@ type: adr
 title: Harness — წვდომები, აკრძალვები, hook-ები და guard
 status: proposed
 date: 2026-09-18
+scope: engine
 deciders: მფლობელი (`/approve`); შემთავაზებელი — Claude Opus 5
 related:
   - "[[ADR-0001-foundation-and-sdlc-loop]]"

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""The engine's status line (ADR-0010): the owner's own status line, plus one line about the prompt cache.
+"""The engine's status line (ADR-0010): the owner's own status line, the project's stage (ADR-0011) and one line about
+the prompt cache.
+
+The stage line names where the project stands in the F1–F5 loop and the person's next command, read from the documents'
+statuses by tools/context_graph.py (`🧭 ეტაპი 2/5 · სპეციფიკაცია — SPEC-0001 გელოდება → /approve spec 0001`).
 
 Claude Code runs the project's `statusLine` command on every update and every `refreshInterval` seconds, with a
 JSON payload on stdin (session_id, transcript_path, model, context_window …), and shows what it prints. A project
@@ -62,6 +66,7 @@ TOKEN_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_t
 EMPTY = "empty"  # the session has made no model call yet
 SID_RE = re.compile(r"[A-Za-z0-9_-]{1,80}")  # a session id is a UUID: nothing that could walk out of a folder
 RED, YELLOW, GREEN, DIM, RESET = "\x1b[31m", "\x1b[33m", "\x1b[32m", "\x1b[2m", "\x1b[0m"
+CYAN = "\x1b[36m"
 
 
 def part(d: dict, key: str) -> dict:
@@ -291,6 +296,16 @@ def cache_line(data: dict, now: float) -> str:
             f" — ახალი თემისთვის ახალი სესია იაფია{RESET}")
 
 
+def stage_line() -> str:
+    """Where the project stands and the person's next command (ADR-0011) — read from the documents' statuses, the
+    same way the SessionStart brief reads them (~15 ms). Empty when this folder holds no intent.md."""
+    import context_graph as cg
+    root = cg.default_root()
+    if not (root / "intent.md").is_file():
+        return ""
+    return f"{CYAN}🧭 {cg.project_stage(cg.load(root)).status_line()}{RESET}"
+
+
 def main() -> int:
     payload = sys.stdin.read()
     if os.environ.get(INNER):
@@ -306,10 +321,14 @@ def main() -> int:
     except Exception as e:
         first = f"statusline: {type(e).__name__}"
     try:
+        stage = stage_line()
+    except Exception as e:
+        stage = f"{DIM}🧭 ეტაპი: უცნობია ({type(e).__name__}){RESET}"
+    try:
         second = cache_line(data, time.time())
     except Exception as e:
         second = f"{DIM}♻ ქეში: უცნობია ({type(e).__name__}){RESET}"
-    print(f"{first}\n{second}")
+    print("\n".join(line for line in (first, stage, second) if line))
     return 0
 
 
