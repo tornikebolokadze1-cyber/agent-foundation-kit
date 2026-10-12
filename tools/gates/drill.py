@@ -358,12 +358,23 @@ def g_graph_kind(tmp: Path, vault: Path) -> None:
     out = stage(v)
     expect("`docs/guides/website.md` §1" in out and "ჯერ ჩაწერე intent.md" not in out, "seeded: kind website → the "
            "interview names its guide (§1)", out[:300])
+    expect("ერთი კითხვა ერთ შეტყობინებაში" in out and "§7-ის შაბლონურ სიას ცვლის" in out,
+           "seeded: the interview asks one question per message, and the guide's questions replace §7's template list "
+           "(journey D-050)", out[:400])
     rc, gout, _ = graph_check(v)
     expect(rc == 0, "control: a project with kind website and its guide is a clean graph", gout[-200:], kind="control")
     v = fresh(tmp, "kind-typo", vault)
     edit(v / intent, "type: intent\n", "type: intent\nkind: webiste\n")
     rc, gout, _ = graph_check(v)
     expect(rc == 1 and "KIND" in gout, "seeded: kind webiste (a typo) → KIND", f"rc={rc} out={gout[-200:]!r}")
+    v = fresh(tmp, "kind-spec-review", vault)
+    edit(v / intent, "status: draft", "status: accepted")
+    out = stage(v)
+    expect("SPEC-0001 შენს გადახედვას ელოდება" in out and "CHECKPOINT commit" in out and "„გავაგრძელო?“-ს ნუ იკითხავ" in out
+           and "ჩატში" in out and "წაიკითხე `docs/specs" not in out and "ეს ბლოკი ყოველ ჯერზე" in out,
+           "seeded: a spec waits for the person → it is summed up in the chat (no 'read the file'), and after "
+           "/approve the agent saves and goes on without asking; the block says it outranks older notes (journey D-050)",
+           out[:400])
     v = fresh(tmp, "graph-printable", vault)
     # ESC, NEL (a C1 control some terminals treat as a new line), a bidi override, a tag character. A lone CR cannot
     # get this far: reading a file turns it into a new line, which ends the frontmatter value.
@@ -384,8 +395,11 @@ def g_graph_kind(tmp: Path, vault: Path) -> None:
     for rel_, old, new in [kind, *built, (plan, "status: draft", "status: approved")]:
         edit(v / rel_, old, new)
     checks(v, lint_on=False)
-    expect("ჯერ ჩართე კოდის შემოწმებები" in stage(v), "seeded: building with `lint` and `unit` both off → the agent "
-           "switches the code checks on first", stage(v)[:300])
+    out = stage(v)
+    expect("ჯერ ჩართე კოდის შემოწმებები" in out and "`unit` — პირველ ტესტთან ერთად" in out
+           and "ხელით რედაქტირებას ნუ სთხოვ" in out and "დაელოდე" not in out,
+           "seeded: building with `lint` and `unit` both off → the agent switches the code checks on first (lint now, "
+           "unit with the first test, never by the person's hand) and the person is not just told to wait", out[:300])
     checks(v, lint_on=True)
     expect("ჯერ ჩართე კოდის შემოწმებები" not in stage(v), "control: a code check is on → no such note", stage(v)[:300],
            kind="control")

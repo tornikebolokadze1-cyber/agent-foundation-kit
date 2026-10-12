@@ -791,6 +791,8 @@ class Stage:
             f"- აგენტს: {self.agent}",
             f"- გზა (ADR-0001-ის ციკლი, plan.md-ის F1–F5): {path}. ადამიანს ეტაპი ჩვეულებრივი სიტყვებით უთხარი, "
             "ბრძანება — ზუსტად.",
+            "- ეს ბლოკი ყოველ ჯერზე დოკუმენტების სტატუსებიდან ითვლება: თუ progress.md-ის, plan.md-ის ან tasks/todo.md-ის "
+            "ჩანაწერი მას ეწინააღმდეგება, ის ჩანაწერი ძველია — ამ ბლოკს მიჰყევი, ჩანაწერი კი `/session-close`-ით გაასწორე.",
         ]))
 
 
@@ -815,17 +817,21 @@ def code_checks_off(root: Path) -> bool:
 
 NEEDS_KIND = ("ჯერ ჩაწერე intent.md-ის frontmatter-ში პროექტის ტიპი — `kind:` website / game / agent / automation / "
               "other (ცხრილი: `docs/guides/other.md`) — და კითხვები მისი სახელმძღვანელოს §1-დან აიღე; ")
-CHECKS_FIRST = ("ჯერ ჩართე კოდის შემოწმებები: `tools/gates/gates.toml`-ში `lint` და `unit` სტეკის ADR-ის ბრძანებებით, "
-                "მხოლოდ პროექტის საკუთარ კოდზე (არა ძრავის `tools/`-ზე) — ფაილი დაცულია, ამიტომ ადამიანის „კი“ სჭირდება; "
-                "მერე ")
+CHECKS_FIRST = ("ჯერ ჩართე კოდის შემოწმებები (გეგმის პირველი ამოცანა): `tools/gates/gates.toml`-ში `lint` — ახლავე, "
+                "`unit` — პირველ ტესტთან ერთად (ცარიელი ტესტების გაშვება არაფერს ამტკიცებს), სტეკის ADR-ის ბრძანებებით "
+                "და მხოლოდ პროექტის საკუთარ კოდზე (არა ძრავის `tools/`-ზე); ფაილი დაცულია — ადამიანს „კი“ ჰკითხე, ხელით "
+                "რედაქტირებას ნუ სთხოვ; მერე ")
 
 
 def _review(number: int, doc: Node, step: str, fix: str) -> Stage:
     """A document waits for the person: they read it and approve it, or say what to change."""
     cmd = approve_hint(doc)
     return Stage(number, short=f"{doc.id} გელოდება", step=step,
-                 person=f"წაიკითხე `{doc.path}`; თუ ეთანხმები — `{cmd}`, თუ არა — თქვი, რა შეიცვალოს",
-                 agent=f"{doc.id}: შეასწორე ადამიანის შენიშვნების მიხედვით ({fix}); დამტკიცება მხოლოდ მისი `{cmd}`-ია",
+                 person=f"აგენტი ჩატში მოკლედ გაჩვენებს, რა წერია (ფაილი — `{doc.path}`); თუ ეთანხმები — `{cmd}`, "
+                        "თუ არა — თქვი, რა შეიცვალოს",
+                 agent=f"{doc.id}: ჩატში აჩვენე მოკლე შეჯამება — რას გააკეთებს, რას არა, რა უნდა გადაწყვიტოს ადამიანმა "
+                       f"(ფაილის წაკითხვას ნუ სთხოვ); შეასწორე მისი შენიშვნებით ({fix}); დამტკიცება მხოლოდ მისი `{cmd}`-ია, "
+                       "მის შემდეგ კი ეგრევე შეინახე (CHECKPOINT commit) და შემდეგ ნაბიჯზე გადადი — „გავაგრძელო?“-ს ნუ იკითხავ",
                  command=cmd, doc=doc.path)
 
 
@@ -843,8 +849,10 @@ def project_stage(g: Graph) -> Stage:
         return Stage(1, short="ინტერვიუ", step="ინტერვიუ — განზრახვა იწერება",
                      person="უპასუხე კითხვებს; როცა intent.md შენს აზრს სწორად ასახავს — `/approve intent`",
                      agent=("" if intent.kind in KINDS else NEEDS_KIND)
-                     + "გააგრძელე `/intent`-ის ინტერვიუ (§7-ის ღია კითხვები); როცა ღია კითხვა აღარ დარჩება, მოკლედ "
-                       "აჩვენე, რა ჩაიწერა, და შესთავაზე `/approve intent`" + guide_note(g, "§1 — კითხვები"),
+                     + "გააგრძელე `/intent`-ის ინტერვიუ — ერთი კითხვა ერთ შეტყობინებაში, 2–3 ვარიანტითა და "
+                       "რეკომენდაციით; როცა ღია კითხვა აღარ დარჩება, მოკლედ აჩვენე, რა ჩაიწერა, და შესთავაზე `/approve intent`"
+                     + guide_note(g, "§1 — კითხვები (ისინი §7-ის შაბლონურ სიას ცვლის: §7-ში მხოლოდ ჯერ უპასუხო "
+                                     "კითხვები დატოვე)"),
                      command="/approve intent", doc="intent.md")
     specs = sorted((n for n in g.nodes.values() if n.type == "spec" and not n.foreign and n.status != "superseded"),
                    key=lambda n: n.id)
@@ -877,7 +885,8 @@ def project_stage(g: Graph) -> Stage:
         return _review(4, plan, f"{plan.id} შენს გადახედვას ელოდება", "`/feature-plan`")
     if plan.status != "done":
         return Stage(4, short=f"{plan.id} მიმდინარეობს", step=f"{plan.id} მიმდინარეობს — აგენტი ამოცანა-ამოცანა აშენებს",
-                     person="დაელოდე — აგენტი აშენებს და შედეგს გაჩვენებს",
+                     person="აგენტი ამოცანა-ამოცანა აშენებს; როცა რამეს გკითხავს — შენს მონაცემებს, „კი“-ს დაყენებაზე "
+                            "ან დაცული ფაილის შეცვლაზე — უპასუხე; ბოლოს შედეგს გაჩვენებს",
                      agent=(CHECKS_FIRST if code_checks_off(g.root) else "")
                      + f"შეასრულე {plan.id} ამოცანა-ამოცანა (`/feature-plan`, ნაწილი B): ტესტი, კოდი, gate-ები, commit; "
                        "ბოლოს აჩვენე შედეგი", doc=plan.path)
