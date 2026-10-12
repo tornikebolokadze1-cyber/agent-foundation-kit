@@ -20,10 +20,18 @@ import re
 MARKER_PREFIX = "[" + "REDACTED:"
 MARKER_RE = re.compile(r"\[" + r"REDACTED:[a-z0-9-]+\]")
 
+# A private key: the footer is looked for only this far past the header (an RSA-16384 key is ~13 KB), so text full of
+# headers without a footer is read once, not once per header (review S6). A key cut off before its footer still loses
+# its body: the lines right after the header that look like a key's (base64, a `Name: value` field, blank) go with it.
+PEM_LABEL = r"(?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?"
+PEM_FOOTER_WITHIN = 16384
+PEM_BODY_LINE = r"(?:\r?\n(?:[A-Za-z0-9+/=]+|[A-Za-z][A-Za-z0-9-]*:[^\r\n]*|[ \t]*)(?=\r?\n|$))"
+
 # (kind, pattern). A pattern with a group named `secret` replaces only that group.
 SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
-    ("private-key", re.compile(r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"
-                               r"(?:[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----)?")),
+    ("private-key", re.compile(r"-----BEGIN " + PEM_LABEL + r"-----"
+                               r"(?:[\s\S]{0," + str(PEM_FOOTER_WITHIN) + r"}?-----END " + PEM_LABEL + r"-----"
+                               r"|" + PEM_BODY_LINE + r"*(?:\r?\n-----END " + PEM_LABEL + r"-----)?)")),
     ("anthropic-key", re.compile(r"\bsk-ant-[a-z]{3,5}\d{2}-[A-Za-z0-9_-]{20,}")),
     ("openai-key", re.compile(r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|\bsk-[A-Za-z0-9]{40,}")),
     ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{30,}")),

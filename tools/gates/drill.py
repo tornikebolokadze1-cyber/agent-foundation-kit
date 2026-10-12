@@ -116,10 +116,10 @@ def gate_with_gitleaks(found: str | None, root: Path, *args: str) -> tuple[int, 
     return rc, out + err
 
 
-def firstrun_with_gitleaks(found: str | None, env: dict) -> tuple[int, str, str]:
+def firstrun_with_gitleaks(found: str | None, env: dict, cwd: Path | None = None) -> tuple[int, str, str]:
     """.claude/hooks/firstrun.py as on a machine where the gitleaks search finds `found` (None = not installed)."""
     return check([PY, "-c", WITH_GITLEAKS + "runpy.run_path(sys.argv[3], run_name='__main__')", str(CODE / "tools/gates"),
-                  found or "", str(CODE / ".claude/hooks/firstrun.py")], env=env)
+                  found or "", str(CODE / ".claude/hooks/firstrun.py")], env=env, cwd=cwd)
 
 
 # ── fixture vault ────────────────────────────────────────────────────────────
@@ -364,6 +364,22 @@ def g_graph_kind(tmp: Path, vault: Path) -> None:
     edit(v / intent, "type: intent\n", "type: intent\nkind: webiste\n")
     rc, gout, _ = graph_check(v)
     expect(rc == 1 and "KIND" in gout, "seeded: kind webiste (a typo) → KIND", f"rc={rc} out={gout[-200:]!r}")
+    v = fresh(tmp, "graph-printable", vault)
+    # ESC, NEL (a C1 control some terminals treat as a new line), a bidi override, a tag character. A lone CR cannot
+    # get this far: reading a file turns it into a new line, which ends the frontmatter value.
+    hidden = ("\x1b", chr(0x85), chr(0x202E), chr(0xE0041))
+    edit(v / intent, "status: draft", "status: accepted")
+    edit(v / "docs/specs/SPEC-0001-demo.md", "id: SPEC-0001\n", "id: SPEC-0001" + "[2K".join(hidden) + "X\n")
+    edit(v / "docs/specs/SPEC-0001-demo.md", "title: Demo spec", "title: Demo" + "".join(hidden) + " spec")
+    out = stage(v) + py("tools/context_graph.py", "--root", str(v), "pending")[1]
+    out += hook_out(py("tools/context_graph.py", "--root", str(v), "brief", env={"EPISODIC_NESTED": None})[1]).get(
+        "hookSpecificOutput", {}).get("additionalContext", "")
+    out += py("tools/context_graph.py", "--root", str(v), "query", "SPEC-0001-demo")[1]
+    cmap = v / "memory/graph/CONTEXT-MAP.md"
+    out += cmap.read_text(encoding="utf-8") if cmap.is_file() else "(no CONTEXT-MAP.md)" + "".join(hidden)
+    expect("SPEC-0001" in out and "Demo spec" in out and not any(c in out for c in hidden),
+           "seeded: an id and a title carrying an ANSI escape, a C1 control, a bidi override and a tag character → "
+           "stage, pending, query, the brief and CONTEXT-MAP.md carry none of them (review S5)", repr(out[:240]))
     v = fresh(tmp, "kind-build-off", vault)
     for rel_, old, new in [kind, *built, (plan, "status: draft", "status: approved")]:
         edit(v / rel_, old, new)
@@ -1115,6 +1131,12 @@ def g_engine_scan_reach(tmp: Path, v: Path, token: str) -> None:
     rc, out = gate_with_gitleaks(None, w, "--only", "secrets", "--pre-commit")
     expect(rc == 0 and "1 binary NOT scanned" in out, "control: a binary file next to a clean text file → PASS that says "
            "the binary was not scanned", out[-240:], kind="control")
+    rc, out = gate_with_gitleaks(None, w, "--only", "secrets", "--pre-commit", "--quiet")
+    expect(rc == 0 and "binary, not scanned: logo.png" in out,
+           "seeded: the same commit through the hook's --quiet output → the unscanned binary is still named", out[-240:])
+    rc, out = gate_with_gitleaks(None, w, "--only", "tasks", "--pre-commit", "--quiet")
+    expect(rc == 0 and out.startswith("GATES PASS"), "control: a plain PASS stays silent under --quiet", out[-160:],
+           kind="control")
     w = fresh(tmp, "gates-planted-gitleaks", v)
     git(w, "add", "-A")
     planted = w / "planted.txt"
@@ -1316,6 +1338,27 @@ def g_sentinel(tmp: Path, vault: Path) -> None:
     upd = hook_out(out).get("hookSpecificOutput", {}).get("updatedToolOutput") or {}
     expect("PRIVATE KEY" not in str(upd.get("file", {}).get("content", "PRIVATE KEY")),
            "seeded: a private key in a file the agent reads → hidden (Read output rewritten)", out[:120])
+    head, body = key.split("\n")[0], key.split("\n")[1]
+    cut = f"{head}\r\nProc-Type: 4,ENCRYPTED\r\n\r\n{body}\r\n{body[:30]}\r\nnext line (kept)."
+    rc, out, _ = sentinel(v, "post", {"tool_name": "Bash", "tool_input": {"command": "head key.pem"},
+                                      "tool_response": {**bash_resp, "stdout": cut}})
+    upd = hook_out(out).get("hookSpecificOutput", {}).get("updatedToolOutput") or {}
+    expect(body[:30] not in out and "PRIVATE KEY" not in str(upd.get("stdout")) and "next line (kept)." in str(upd.get("stdout")),
+           "seeded: a private key cut off before its footer → its body is hidden too, the next line is kept", out[:160])
+    huge = "\n".join([head] + [body] * 400 + ["-----END " + "RSA PRIVATE KEY-----", "after (kept)."])
+    rc, out, _ = sentinel(v, "post", {"tool_name": "Bash", "tool_input": {"command": "cat big.pem"},
+                                      "tool_response": {**bash_resp, "stdout": huge}})
+    upd = hook_out(out).get("hookSpecificOutput", {}).get("updatedToolOutput") or {}
+    expect(body not in out and "PRIVATE KEY" not in str(upd.get("stdout")) and "after (kept)." in str(upd.get("stdout")),
+           "seeded: a 26 KB key (footer beyond the 16 KB window) → hidden whole, footer included", out[:160])
+    flood = ("x" * 1000 + "\n" + head + "\n") * 2000
+    started = time.monotonic()
+    rc, out, _ = sentinel(v, "post", {"tool_name": "Bash", "tool_input": {"command": "cat big.log"},
+                                      "tool_response": {**bash_resp, "stdout": flood}})
+    took = time.monotonic() - started
+    expect(rc == 0 and "SENTINEL[R1]" in out and took < 6,
+           f"seeded: 2000 key headers without a footer in 2 MB → redacted in {took:.1f}s (< 6 s; the hook's limit is 20 s)",
+           out[-120:])
     rc, out, _ = sentinel(v, "post", {"tool_name": "mcp__drill__fetch", "tool_input": {},
                                       "tool_response": [{"type": "text", "text": "secret " + samples["github-token"]}]})
     upd = hook_out(out).get("hookSpecificOutput", {}).get("updatedMCPToolOutput")
@@ -1625,10 +1668,11 @@ def g_firstrun(tmp: Path) -> None:
         write(p / "intent.md", "# x\n")
         return p
 
-    def first(root: Path, found: str | None = None, **env: str | None) -> tuple[int, str]:
+    def first(root: Path, found: str | None = None, cwd: Path | None = None, **env: str | None) -> tuple[int, str]:
         """firstrun on a machine whose gitleaks search finds `found` (default: no gitleaks)."""
         rc, out, err = firstrun_with_gitleaks(found, {"GITLEAKS_BIN": None, "FIRSTRUN_ROOT": str(root),
-                                                      "GIT_CONFIG_GLOBAL": str(gcfg), "EPISODIC_NESTED": None, **env})
+                                                      "GIT_CONFIG_GLOBAL": str(gcfg), "EPISODIC_NESTED": None, **env},
+                                              cwd=cwd)
         return rc, out + err
 
     def hooks_path(root: Path) -> str:
@@ -1706,6 +1750,18 @@ def g_firstrun(tmp: Path) -> None:
     rc, out = first(g, PATH=path_without("gitleaks", "git"))
     expect(rc == 0 and "winget install Git.Git" in out and not (g / ".git").exists(),
            "seeded: no git on the machine → the agent is told how to install it; nothing is created", out[-200:])
+    if os.name == "nt":  # Windows looks in the current folder first unless NoDefaultCurrentDirectoryInExePath is set
+        h = project("fr-planted-git")
+        write(h / "git.bat", '@echo PLANTED-RAN> "%~dp0planted.txt"\n@exit /b 0\n')
+        # Run directly, not through gate (importing gate sets the variable too), and without the variable Claude Code
+        # itself sets, so only firstrun's own line protects the search.
+        rc, out, err = py(".claude/hooks/firstrun.py", cwd=h, env={
+            "FIRSTRUN_ROOT": str(h), "GIT_CONFIG_GLOBAL": str(gcfg), "EPISODIC_NESTED": None, "GITLEAKS_BIN": None,
+            "NoDefaultCurrentDirectoryInExePath": None, "PATH": path_without("gitleaks", "git")})
+        out += err
+        expect(rc == 0 and "winget install Git.Git" in out and not (h / "planted.txt").exists(),
+               "seeded: no git on the machine and a git.bat planted in the project, run from there → git is still "
+               "missing; the planted file is never taken for git (review S4)", out[-200:])
 
 
 def sl_stamp(minutes_ago: float) -> str:
@@ -1769,6 +1825,13 @@ def g_engine_statusline(tmp: Path) -> None:
     expect(rc == 0 and len(lines) >= 3 and "ეტაპი 2/5" in lines[1] and "/approve spec 0001" in lines[1] and "ქეში" in lines[2],
            "seeded: the line under the owner's names the project's stage and the next command (2/5 → /approve spec 0001), "
            "the cache line follows", out[-240:])
+    odd_vault = fresh(tmp, "sl-odd-vault", stage_vault)
+    hidden = ("\x1b[2K", chr(0x85), chr(0x202E), chr(0xE0041))  # the line's own colours are ESC sequences too
+    edit(odd_vault / "docs/specs/SPEC-0001-demo.md", "id: SPEC-0001\n", "id: SPEC-0001" + "".join(hidden) + "X\n")
+    rc, out = show(sl_transcript(t / "odd-id.jsonl", 5, 4, 100_000), CONTEXT_ROOT=str(odd_vault))
+    expect(rc == 0 and "ეტაპი 2/5" in out and "SPEC-0001[2KX" in out and not any(c in out for c in hidden),
+           "seeded: a spec id carrying an ANSI escape, a C1 control, a bidi override and a tag character → the stage "
+           "line prints none of them (review S5)", repr(out[-200:]))
     rc, out = show(sl_transcript(t / "no-project.jsonl", 5, 4, 100_000), CONTEXT_ROOT=str(tmp / "sl-no-project"))
     expect(rc == 0 and "ეტაპი" not in out and "ქეში თბილია" in out,
            "control: a folder without intent.md → no stage line, the rest unchanged", out[-160:], kind="control")
@@ -1817,9 +1880,11 @@ def g_engine_statusline(tmp: Path) -> None:
            f"seeded: the owner's line hangs → it and its child are stopped after 4 s; the status line came back in "
            f"{took:.0f} s with its own line", out[-160:])
     late = tmp / "late-marker.txt"
+    # The base is stopped at 4 s, and taskkill /T itself takes seconds on a machine running ~1000 processes (2026-10-12:
+    # 2.2 s for a PID that does not exist), so the child writes only at 10 s — after the stop has surely finished.
     show(sl_transcript(t / "orphan.jsonl", 5, 4, 100_000),
-         ENGINE_STATUSLINE_BASE=f"bash -c 'sleep 6; echo LATE > \"{late.as_posix()}\"'")
-    time.sleep(0 if STUB else 8)
+         ENGINE_STATUSLINE_BASE=f"bash -c 'sleep 10; echo LATE > \"{late.as_posix()}\"'")
+    time.sleep(0 if STUB else 12)
     expect(not STUB and not late.exists(), "seeded: when the owner's line is stopped, everything it started stops too — "
            "nothing it began writes afterwards", str(late))
     me = f'"{Path(PY).as_posix()}" "{(CODE / ".claude/hooks/statusline.py").as_posix()}"'

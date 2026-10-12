@@ -120,6 +120,16 @@ LEDGER_PATH = "memory/approvals.md"
 WIKILINK_RE = re.compile(r"!?\[\[([^\]\|#\n]*)(#[^\]\|\n]*)?(\|[^\]\n]*)?\]\]")
 MDLINK_RE = re.compile(r"(?<!!)\[[^\]\n]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+# Text taken from a document — an id, a title, a path — reaches the model (the brief) and a terminal (the status line,
+# `stage`, `pending`). A control character (an ANSI escape, a carriage return) or a hidden Unicode one (tags,
+# bidirectional controls) reaches neither (review S5); a value never holds a newline — frontmatter is read by lines.
+# Built with chr() so this file stays plain ASCII (the `instructions` gate).
+UNPRINTABLE_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f" + chr(0x202A) + "-" + chr(0x202E) + chr(0x2066) + "-"
+                            + chr(0x2069) + chr(0xE0000) + "-" + chr(0xE007F) + "]")
+
+
+def printable(text: str) -> str:
+    return UNPRINTABLE_RE.sub("", text)
 
 
 # ── Data model ───────────────────────────────────────────────────────────────
@@ -769,19 +779,19 @@ class Stage:
         return f"ეტაპი {self.number}/{len(STAGES)} · {self.name}"
 
     def status_line(self) -> str:
-        return f"{self.label} — {self.short}" + (f" → {self.command}" if self.command else "")
+        return printable(f"{self.label} — {self.short}" + (f" → {self.command}" if self.command else ""))
 
     def block(self) -> str:
         where = f" (`{self.doc}`)" if self.doc else ""
         path = " → ".join(f"{k} {v}" for k, v in STAGES.items())
-        return "\n".join([
+        return printable("\n".join([
             "## ეტაპი — სად დგას პროექტი (`py -3.12 tools/context_graph.py stage`, ADR-0011)",
             f"- **{self.label}** — {self.step}{where}",
             f"- ადამიანს: {self.person}",
             f"- აგენტს: {self.agent}",
             f"- გზა (ADR-0001-ის ციკლი, plan.md-ის F1–F5): {path}. ადამიანს ეტაპი ჩვეულებრივი სიტყვებით უთხარი, "
             "ბრძანება — ზუსტად.",
-        ])
+        ]))
 
 
 def guide_note(g: Graph, section: str) -> str:
@@ -933,7 +943,7 @@ def build(g: Graph, issues: list[Issue]) -> Path:
     out = g.root / "memory" / "graph"
     out.mkdir(parents=True, exist_ok=True)
     (out / "graph.json").write_text(json.dumps(to_json(g), ensure_ascii=False, indent=1), encoding="utf-8")
-    (out / "CONTEXT-MAP.md").write_text(context_map(g, issues), encoding="utf-8")
+    (out / "CONTEXT-MAP.md").write_text(printable(context_map(g, issues)), encoding="utf-8")
     return out
 
 
@@ -999,7 +1009,7 @@ def brief(g: Graph, issues: list[Issue]) -> str:
                      "(`py -3.12 tools/context_graph.py pending`)")
     lines.append("- ორიენტაცია: `memory/graph/CONTEXT-MAP.md`; ერთი კვანძის სამეზობლო: "
                  "`py -3.12 tools/context_graph.py query <id>`")
-    return "\n".join(lines)
+    return printable("\n".join(lines))
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -1048,18 +1058,18 @@ def main(argv: list[str] | None = None) -> int:
                   f"errors={n_err}, warnings={n_warn}")
         return 1 if any(i.level == "error" for i in shown) else 0
     if a.cmd == "query":
-        print(query(g, a.ident, max(1, a.depth)))
+        print(printable(query(g, a.ident, max(1, a.depth))))
         return 0
     if a.cmd == "pending":
         pend, eng = pending(g), pending(g, engine=True)
         for n in pend:
-            print(f"{n.id:10} {n.status:9} {approve_hint(n):22} {n.title}")
+            print(printable(f"{n.id:10} {n.status:9} {approve_hint(n):22} {n.title}"))
         if not pend:
             print("nothing in the project is waiting for the owner")
         if eng:
             print("\nengine decisions (scope: engine) — the engine author's, they do not hold up the project's stages:")
             for n in eng:
-                print(f"{n.id:10} {n.status:9} {approve_hint(n):22} {n.title}")
+                print(printable(f"{n.id:10} {n.status:9} {approve_hint(n):22} {n.title}"))
         return 0
     if a.cmd == "stage":
         print(project_stage(g).block())
