@@ -729,6 +729,17 @@ def make_transcript(p: Path, when: datetime) -> Path:
     return p
 
 
+def read_settled(p: Path) -> str:
+    """A file a detached process may be replacing at this moment: Windows refuses to open it while the replace is
+    under way (PermissionError — seen on the CI runner, 2026-10-13), so try again for a few seconds."""
+    for _ in range(20):
+        try:
+            return p.read_text(encoding="utf-8")
+        except PermissionError:
+            time.sleep(0.25)
+    return p.read_text(encoding="utf-8")
+
+
 def wait_for(pred, seconds: float = 40.0) -> bool:
     end = time.time() + seconds
     while time.time() < end:
@@ -788,22 +799,26 @@ def g_episodic(tmp: Path, vault: Path) -> None:
            "SessionEnd did not wait for the model: no summary yet when the hook returned (it runs detached)")
     ok = wait_for(lambda: "DRILL-STUB-TITLE" in ep.read_text(encoding="utf-8"))
     expect(ok, "detached child wrote the model summary into the episode after the hook returned")
-    prog = (v / "progress.md").read_text(encoding="utf-8")
+    # The child goes on to progress.md and PROPOSALS.md after the episode: wait for both, then read them settled.
+    wait_for(lambda: "DRILL-STUB-TITLE" in (v / "progress.md").read_text(encoding="utf-8")
+             and "DRILL-STUB-PROPOSAL" in (v / "memory/PROPOSALS.md").read_text(encoding="utf-8"), 20.0)
+    prog = read_settled(v / "progress.md")
     expect(f"<!-- ep:EP-{TODAY}-{SID[:8]}:start -->" in prog and "DRILL-STUB-TITLE" in prog,
            "auto summary distributed into progress.md's log (flagged, keyed by episode)")
-    expect("DRILL-STUB-PROPOSAL" in (v / "memory/PROPOSALS.md").read_text(encoding="utf-8"),
+    expect("DRILL-STUB-PROPOSAL" in read_settled(v / "memory/PROPOSALS.md"),
            "auto summary's proposal appended to PROPOSALS.md")
-    secret, ep_after = env["DRILL_STUB_SECRET"], ep.read_text(encoding="utf-8")
+    secret, ep_after = env["DRILL_STUB_SECRET"], read_settled(ep)
     expect(secret not in ep_after and secret not in prog,
            "S8: a secret the summarizer echoed is scrubbed before it reaches the episode and progress.md",
            f"episode has secret={secret in ep_after}, progress has secret={secret in prog}")
     expect("REDACTED:github-token]" in ep_after,
            "S8: the scrub leaves a redaction marker where the summary's secret was", ep_after[-200:])
     expect("DRILL-NEXT" in ep_after, "S8: non-secret summary text survives the scrub", kind="control")
-    expect(re.search(r"(?m)^needs_reconcile: true$", ep.read_text(encoding="utf-8")) is not None,
+    expect(wait_for(lambda: re.search(r"(?m)^needs_reconcile: true$", ep.read_text(encoding="utf-8")) is not None, 20.0),
            "auto-summarised episode is flagged needs_reconcile")
     idx = v / "memory/episodes/INDEX.md"
-    expect(idx.exists() and f"[[EP-{TODAY}-{SID[:8]}]]" in idx.read_text(encoding="utf-8"), "INDEX.md regenerated with a wikilink")
+    expect(wait_for(lambda: f"[[EP-{TODAY}-{SID[:8]}]]" in idx.read_text(encoding="utf-8"), 20.0),
+           "INDEX.md regenerated with a wikilink")
 
     # clean close by /session-close → the child must NOT call the model
     sid2 = "c1ea4000-0000-4000-8000-000000000003"
