@@ -51,6 +51,7 @@ class Result:
     status: str                 # PASS | FAIL | INCONCLUSIVE | SKIP
     summary: str
     details: list[str] = field(default_factory=list)
+    notice: bool = False        # a PASS that left something unchecked: shown even with --quiet (the commit hook)
 
 
 def root_dir() -> Path:
@@ -263,7 +264,7 @@ def engine_scan(root: Path, files: list[Path], pre_commit: bool) -> Result:
         return Result("secrets", "FAIL", summary, found)
     if binary and not scanned:  # content was there and none of it could be read
         return Result("secrets", "INCONCLUSIVE", summary + " — nothing readable was scanned", shown)
-    return Result("secrets", "PASS", summary, shown)
+    return Result("secrets", "PASS", summary, shown, notice=bool(binary))
 
 
 def readable(data: bytes) -> str | None:
@@ -500,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
         files = [f.resolve() for f in files if f.exists()]
     results = run(root, gates, files, a.pre_commit)
     for r in results:
-        if a.quiet and r.status in ("PASS", "SKIP"):
+        if a.quiet and r.status in ("PASS", "SKIP") and not r.notice:
             continue
         print(f"{r.status:12} {r.gate:16} {r.summary}")
         for d in r.details[:25]:
