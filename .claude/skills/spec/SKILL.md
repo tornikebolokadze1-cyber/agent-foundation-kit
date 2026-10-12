@@ -17,11 +17,15 @@ comes first (a spec cannot be approved before that — `approve.py` refuses and 
    Given / When / Then, testable, and each names the gate, test or eval that will prove it. Include
    Georgian-language quality, grounding and the domain invariants (`REVIEW.md`, `docs/domain/`) where they
    apply. Anything unknown → "ღია კითხვები", never a guess. The first version's scope and example criteria
-   for this kind of project are in `docs/guides/<kind>.md` §3.
+   for this kind of project are in `docs/guides/<kind>.md` §3. Keep a first version's spec small enough for
+   a beginner to judge: about 5–8 requirements and at most ~10 acceptance criteria; ask a missing fact in
+   the chat (one question per message) rather than piling up open questions — at most 3 stay in the file.
+   Describe what the result does, not how it is built: the stack is decided at stage 3.
 4. **Index** — add a row to `docs/specs/README.md` (wikilink to the file). When complete, set
    `status: review`.
 5. **Review** — run the `spec-reviewer` subagent on the file. Fix critical/high findings; record the
    rest under "ღია კითხვები".
 6. **Check** — `py -3.12 tools/context_graph.py check <file>`; fix every error.
 7. **Tell the owner** — 3–5 Georgian sentences: what the spec covers, what is out of scope, what they
-   must decide; the approval is `/approve spec NNNN`. Planning (`/feature-plan`) starts only after it.
+   must decide; this summary is what they judge — never ask them to read the file. The approval is
+   `/approve spec NNNN`. Planning (`/feature-plan`) starts only after it.

@@ -19,8 +19,11 @@ argument-hint: "[what changed, or the owner's new answers]"
    approval of the engine's own ADRs. Write the project's type into the frontmatter — `kind:` website / game /
    agent / automation / other (the table in `docs/guides/other.md` decides a mixed idea) — and take the
    interview's questions from that type's guide, `docs/guides/<kind>.md` §1.
-4. **Interview when information is missing** — ONE question at a time, in Georgian, with 2–3 concrete
-   options and your recommendation. Start from the open questions in §7.
+4. **Interview when information is missing** — ONE question per message (never two), in Georgian, with
+   2–3 concrete options and your recommendation. Once `kind` is set, the guide's §1 questions replace the
+   template's list in §7: rewrite §7 as the guide's questions the idea has not answered yet, ask every one
+   of them (none is skipped as obvious), and when one is answered, write the answer where it belongs and
+   delete the question from §7. A question about the stack (what to build it with) waits for stage 3.
 5. **Keep the fixed structure** (§1 ხედვა … §8 წყაროები + ცვლილებების ისტორია). Goals keep stable IDs
    (G1, G2…) — never renumber; retire one with ~~strike-through~~ and the reason. Every goal has
    "how we measure". Every item names its source: **მფლობელი** (the owner said it — with the date) or

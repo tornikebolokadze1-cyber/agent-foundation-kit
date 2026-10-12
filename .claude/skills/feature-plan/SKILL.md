@@ -17,7 +17,10 @@ missing. (`approve.py` refuses a plan on an unapproved spec, and the CHAIN-PLAN 
    model), write that ADR first with `/adr` — the plan links to it and waits for its approval.
 3. Create `docs/plans/PLAN-NNNN-<slug>.md` from [template.md](template.md), `status: draft`,
    `spec: "[[SPEC-…]]"`. Every task: `- [ ] T<n> — <what> (REQ-…, AC-…) — verify: <command or check>`.
-   Small tasks (one commit each). The first tasks write the failing tests/evals (TDD).
+   Small tasks (one commit each); a first version needs about 6–10. If the `lint` and `unit` gates are
+   off, T1 switches them on (part B, step 1) together with the first failing test; the next tasks write
+   the failing tests/evals first (TDD). Any install the plan needs is named in the task, so the person's
+   yes is asked once, when that task starts.
 4. List which gates must be green, which new gates or eval cases this plan adds (each with a drill),
    and the rollback path.
 5. Add a row to `docs/plans/README.md`; run `py -3.12 tools/context_graph.py check <file>`.
@@ -26,10 +29,11 @@ missing. (`approve.py` refuses a plan on an unapproved spec, and the CHAIN-PLAN 
 
 ## B. Executing an approved plan
 
-1. Set `status: in-progress` (allowed). Work task by task, on a branch. Before the first task, if the
-   `lint` and `unit` gates in `tools/gates/gates.toml` are both off, switch them on with the stack ADR's
-   commands, pointed at the project's own code (not the engine's `tools/`) — a protected file, so the person
-   says yes; `unit` goes on together with the first test (an empty test run proves nothing).
+1. Set `status: in-progress` (allowed). Work task by task, on a branch. In T1, if the `lint` and `unit`
+   gates in `tools/gates/gates.toml` are both off, switch them on with the stack ADR's commands, pointed at
+   the project's own code (not the engine's `tools/`): `lint` at once, `unit` together with the first test
+   (an empty test run proves nothing). It is a protected file, so Claude Code asks the person — tell them in
+   one sentence why to say yes; never ask them to edit it by hand.
 2. For each task: failing test/eval first → code → `py -3.12 tools/gates/gate.py` green → tick the box
    → CHECKPOINT commit.
 3. If orchestration is enabled (`orchestration/config.toml`): after the task's code is ready, run
