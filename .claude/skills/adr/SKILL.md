@@ -26,7 +26,8 @@ argument-hint: "<the decision to record> | supersede ADR-NNNN"
    `supersedes: "[[ADR-XXXX-…]]"`; when the owner approves it, `approve.py` marks the old one superseded.
 6. **Does it change an approved spec?** If the decision changes something an approved spec states (a time, a
    number, a name, a limit), say so in the chat, reopen the spec (an edit that only sets `status: draft`),
-   correct that line and ask for both approvals — the spec and the ADR must never contradict each other (L-018).
+   correct every line the decision changes — search the spec for each time, number and name it touches, not
+   only the first — and ask for both approvals; the spec and the ADR must never contradict each other (L-018).
 7. **Index** — add a row to `docs/adr/README.md`; run `py -3.12 tools/context_graph.py check <file>`.
 8. **Tell the owner** in 2–4 Georgian sentences what is being decided and what it costs; the decision is
    `/approve adr NNNN` or `/approve reject adr NNNN <reason>`.
