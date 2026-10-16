@@ -32,6 +32,9 @@ paths:
   (only `needs_reconcile` / `reconciled_*`); the progress log (insert at the top; replace only an
   `<!-- ep:… -->` auto entry for your own episode); `memory/episodes/INDEX.md` is generated.
 - **Auto blocks:** keep `<!-- auto: … -->` markers intact — hooks read between them.
+- **How to edit:** with the Edit / Write tools, never shell `sed` / `awk` / heredoc scripts — each shell edit
+  opens a permission window the person cannot read (a live journey met 16 of them before the build began, 2026-10-16),
+  one wrong flag empties the file, and Edit shows the change itself.
 - **One fact, one place:** domain facts in `docs/domain/`, decisions in ADRs, state in `progress.md`;
   elsewhere link to them.
 - **Foreign folders** (`research/` — other sessions' research or material copied in from outside) —
