@@ -62,8 +62,9 @@ Skills may create new skills only after the owner says yes to a proposal in `mem
 `.claude/agents/`.
 Checker models of another family (Sol, Astra) come in through `orchestration/` once it is enabled.
 **Size and model (ADR-0010):** one narrow question, a bounded reading list, a short answer — keep a subagent's
-context under ~100K tokens. `model: "haiku"` for mechanical search and listing in English; Sonnet for judgement
-and anything Georgian (L-006); Opus for checks. Reading-and-summarising moves to Haiku only after its quality is measured (P-005).
+context under ~100K tokens. `model: "haiku"` for search, listing and reading facts out of files with a short
+English answer, Georgian files included (the engine author's measurement, 2026-10-13: on 20 such questions as accurate
+as Sonnet at ~1/8 of the cost); Sonnet for long summaries, judgement and anything Georgian (L-006); Opus for checks.
 
 ### Talking to the owner
 Georgian, connected prose, simple words; gloss a technical term the first time (e.g. „gate (მანქანური

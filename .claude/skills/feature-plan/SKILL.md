@@ -35,8 +35,10 @@ missing. (`approve.py` refuses a plan on an unapproved spec, and the CHAIN-PLAN 
    (an empty test run proves nothing) — once that test passes, because the commit check runs `unit` and a
    red test cannot be committed. It is a protected file, so Claude Code asks the person — ask first, in one
    sentence saying why to say yes, and never ask them to edit it by hand.
-2. For each task: failing test/eval first → code → `py -3.12 tools/gates/gate.py` green → tick the box
-   → CHECKPOINT commit.
+2. For each task: write the test/eval and run it — see it fail — then the code → `py -3.12 tools/gates/gate.py`
+   green → tick the box → CHECKPOINT commit. Then go straight on to the next task in the same reply; stop
+   only when the person is needed (a yes for an install or a protected file, an account, a decision, or a
+   result to look at) — never end a reply with "I'll start the next task" and wait.
 3. If orchestration is enabled (`orchestration/config.toml`): after the task's code is ready, run
    `py -3.12 orchestration/run.py code-check --plan PLAN-NNNN --task T<n>` (the owner is asked).
    Fix critical/high findings; at most 2 rounds — after that report open findings as UNVERIFIED.
