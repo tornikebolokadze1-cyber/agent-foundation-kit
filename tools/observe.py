@@ -7,8 +7,8 @@ tool calls with their inputs, results and errors, hook output, permission denial
 every subagent to <session>/subagents/*.jsonl. This tool only reads those files: no extra hook, no
 runtime cost, no second log that could drift from the first. The report is in Georgian (ADR-0007).
 
-  py -3.12 tools/observe.py report [--session ID|last|all] [--brief] [--json]
-  py -3.12 tools/observe.py sessions [--days N]
+  bash .claude/hooks/py.sh tools/observe.py report [--session ID|last|all] [--brief] [--json]
+  bash .claude/hooks/py.sh tools/observe.py sessions [--days N]
 
 Exit 0 = report printed · 2 = INCONCLUSIVE: no transcript found, or nothing in it could be read (no
 evidence is not a clean report). It never prints a tool's output, and every command, path or query it
@@ -142,7 +142,9 @@ def notable_kind(seg: list[str], word: str, start: int) -> str | None:
     gi = guard.git_index(seg, word, start)
     if gi is not None:
         return git_kind(seg, gi)
-    pip_module = word in ("py", "python", "python3") and "-m" in args and "pip" in args and "install" in args
+    launcher = word in ("bash", "sh") and args[:1] != [] and args[0].replace("\\", "/").endswith("py.sh")
+    python = bool(re.fullmatch(r"py|python[\d.]*", word)) or launcher  # python3.12, .venv/bin/python, py.sh
+    pip_module = python and "-m" in args and "pip" in args and "install" in args
     if word in REMOTE_RUNNERS or pip_module or (word in INSTALLERS and INSTALL_SUBCMDS & set(args)):
         return "დაყენება"
     if word in DELETERS or (word == "find" and "-delete" in args):

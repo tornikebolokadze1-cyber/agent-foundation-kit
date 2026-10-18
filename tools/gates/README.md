@@ -11,13 +11,16 @@ title: კარიბჭეები (gates) — როგორ მუშა�
 ## გაშვება
 
 ```bash
-py -3.12 tools/gates/gate.py                 # ყველა ჩართული gate, მთელი პროექტი
-py -3.12 tools/gates/gate.py --list          # ყველა gate, გამორთულებიც, მიზეზით
-py -3.12 tools/gates/gate.py --pre-commit    # რასაც .githooks/pre-commit უშვებს
-py -3.12 tools/gates/gate.py --files a.md    # მხოლოდ ეს ფაილები (Stop hook ასე იყენებს)
-py -3.12 tools/gates/drill.py                # ყოველი შემოწმება განზრახ ტყდება — უნდა დაიჭიროს
-py -3.12 tools/gates/drill.py --self-test    # დრილის შემოწმება: stub-ებით უნდა თქვას DEAD
+bash .claude/hooks/py.sh tools/gates/gate.py                 # ყველა ჩართული gate, მთელი პროექტი
+bash .claude/hooks/py.sh tools/gates/gate.py --list          # ყველა gate, გამორთულებიც, მიზეზით
+bash .claude/hooks/py.sh tools/gates/gate.py --pre-commit    # რასაც .githooks/pre-commit უშვებს
+bash .claude/hooks/py.sh tools/gates/gate.py --files a.md    # მხოლოდ ეს ფაილები (Stop hook ასე იყენებს)
+bash .claude/hooks/py.sh tools/gates/drill.py                # ყოველი შემოწმება განზრახ ტყდება — უნდა დაიჭიროს
+bash .claude/hooks/py.sh tools/gates/drill.py --self-test    # დრილის შემოწმება: stub-ებით უნდა თქვას DEAD
+bash .claude/hooks/py.sh tools/gates/drill_additions.py      # drill.py-ში ჯერ ჩაუსმელი შემთხვევები — ხელით
 ```
+
+`bash .claude/hooks/py.sh` ძრავის გამშვებია: Windows-ზე, macOS-სა და Linux-ზე Python 3.12-ს ან უფრო ახალს თავად პოულობს (Windows-ზე `py -3.12`-იც მუშაობს).
 
 **შედეგი:** `0` — ყველა ჩართული gate გავიდა; `1` — რაღაც ჩავარდა; `2` — INCONCLUSIVE (ვერ გაეშვა, მაგ. `GITLEAKS_BIN` არარსებულ ფაილზე მიუთითებს, ან ნული ფაილი შეამოწმა). **SKIP** ნიშნავს „გამორთულია" — ეს არ არის „გავიდა", და ბოლო ხაზი ყოველთვის ამბობს, რამდენი gate-ი არ შემოწმებულა.
 
@@ -26,6 +29,7 @@ py -3.12 tools/gates/drill.py --self-test    # დრილის შემო�
 - **ყოველ commit-ზე** — `.githooks/pre-commit` (`core.hooksPath = .githooks`, მხოლოდ ამ რეპოში — ამას პირველი სესიის დაწყებისას `.claude/hooks/firstrun.py` თავად რთავს). გვერდის ავლა (`--no-verify`) აკრძალულია.
 - **ყოველი ტურის ბოლოს** — Stop hook ამოწმებს მხოლოდ იმ ფაილებს, რაც ამ სესიამ შეცვალა; ჩავარდნისას აგენტი აგრძელებს და ასწორებს.
 - **ხელით** — ნებისმიერ დროს, ზემოთ მოცემული ბრძანებით.
+- **ჯერ მხოლოდ ხელით** — `drill_additions.py`: ორკესტრაციის I ეტაპის, Python-ის გამშვებისა და პირველი გაშვების ახალი შემთხვევები (დისპეჩერის ჯგუფი მხოლოდ იქ ეშვება, სადაც `orchestration/decide.py` არსებობს — ამ შაბლონში ის არ არის, და ეს ეკრანზე იწერება). ისინი `drill.py`-ის ენაზეა დაწერილი და მასში მოგვიანებით ჩაისმება; მანამდე commit-ის შემოწმება მათ არ უშვებს, ძრავის საკუთარ საცავში კი მათ GitHub-ის CI უშვებს. შედეგის კოდები `drill.py`-ისავეა: `0` — ყველა ARMED, `1` — DEAD ან DEFECT, `2` — INCONCLUSIVE.
 
 ## ახალი gate-ის დამატება
 

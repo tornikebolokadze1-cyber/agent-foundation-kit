@@ -2,24 +2,34 @@
 # answers `status` and `--dry-run`. Switching it on is the owner's decision (proposal
 # P-001); this is a protected file, so the agent has to ask before changing it.
 # Round caps are enforced by run.py from the run records in orchestration/runs/.
+# Every model is written provider:model. Stage 1 runs Claude models only: run.py refuses any
+# other provider while stage = 1 (exit 5, STAGE GATE). Moving to stage 2 is the owner's decision.
 enabled = false
+stage = 1
 
 [architecture]                   # large-scale, hard-to-reverse decisions -> an ADR proposal
-maker_model = "claude-fable-5-1"
-checker_model = "gpt-6-astra"
-synthesis_model = "claude-fable-5-1"
+maker_model = "claude:claude-opus-5-5"       # the proposal, and at the end the synthesis
+checker_model = "claude:claude-sonnet-5-5"   # audits the proposal and states its own position
+synthesis_model = "claude:claude-opus-5-5"
 max_rounds = 1                   # maker -> checker -> synthesis, exactly once per topic
 
 [code]                           # implementing one task of an approved plan
-maker_model = "claude-opus-5"    # the interactive session itself writes the code
-checker_model = "gpt-5.6-sol"
+maker_model = "claude:claude-sonnet-5-5"     # the interactive session itself writes the code (start it on Sonnet)
+checker_model = "claude:claude-opus-5-5"     # reads the diff, the specification and REVIEW.md
 max_rounds = 2                   # at most two checker reviews per task, then the owner decides
 max_diff_chars = 120000
 
-[codex]                          # ChatGPT side, via `codex login` (ChatGPT subscription, no API key)
-sandbox = "read-only"            # the checker reads the repository and can write nothing
-timeout_s = 900
+[routine]                        # search, sorting, English summaries, mechanical edits: subagents (model: haiku)
+model = "claude:claude-haiku-5-5"            # never writes Georgian text a person reads (L-006, P-005)
 
-[claude]
-maker_tools = "Read,Grep,Glob"   # read-only tools for the Fable maker / synthesis calls
+[claude]                         # every Claude step: claude -p --restricted, read-only tools
+tools = "Read,Grep,Glob"
+timeout_s = 900
+max_budget_usd = 2.0             # per call (claude -p --max-budget-usd)
+
+# Stage 2 candidates (ADR-0005 §4) — not active; which one takes which role is the owner's decision:
+#   architecture: maker_model = "claude:claude-fable-5-1", checker_model = "codex:gpt-6-astra"
+#   code:         checker_model = "codex:gpt-5.6-sol"
+[codex]                          # ChatGPT side from stage 2, via `codex login` (subscription, no API key)
+sandbox = "read-only"            # the checker reads the repository and can write nothing
 timeout_s = 900

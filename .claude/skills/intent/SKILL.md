@@ -10,7 +10,7 @@ argument-hint: "[what changed, or the owner's new answers]"
 (`/approve intent`). You never set `status: accepted`.
 
 1. **Read** `intent.md`, `docs/domain/*.md`, the "ახლა" block of `progress.md`, and
-   `py -3.12 tools/context_graph.py query intent`.
+   `bash .claude/hooks/py.sh tools/context_graph.py query intent`.
 2. **Reopen if needed.** If `intent.md` is `accepted` and must change: first an edit that ONLY sets
    `status: draft` (the guard allows exactly that), then the content edits.
 3. **The idea first (ADR-0011).** If §1 still holds only the template's `_…_` line and the person has just
@@ -29,6 +29,6 @@ argument-hint: "[what changed, or the owner's new answers]"
    "how we measure". Every item names its source: **მფლობელი** (the owner said it — with the date) or
    **ჰიპოთეზა** (inferred — needs confirmation). Never present a hypothesis as the owner's words.
 6. **Version** — bump `version` (0.1 → 0.2), set `updated`, add one line to the history.
-7. **Check** — `py -3.12 tools/context_graph.py check intent.md`; fix every error.
+7. **Check** — `bash .claude/hooks/py.sh tools/context_graph.py check intent.md`; fix every error.
 8. **Tell the owner** in 2–3 Georgian sentences what changed and what to review, and the next step from
-   `py -3.12 tools/context_graph.py stage`; the decision is `/approve intent`.
+   `bash .claude/hooks/py.sh tools/context_graph.py stage`; the decision is `/approve intent`.

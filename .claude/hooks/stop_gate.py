@@ -76,7 +76,7 @@ def main() -> int:
     for r in failed:
         lines.append(f"  {r.gate}: {r.summary}")
         lines += [f"    {d}" for d in r.details[:MAX_LINES]]
-    lines.append("(Deterministic check, tools/gates/gate.py. Re-run: py -3.12 tools/gates/gate.py --files <file>)")
+    lines.append("(Deterministic check, tools/gates/gate.py. Re-run: bash .claude/hooks/py.sh tools/gates/gate.py --files <file>)")
     print("\n".join(lines), file=sys.stderr)
     return 2
 

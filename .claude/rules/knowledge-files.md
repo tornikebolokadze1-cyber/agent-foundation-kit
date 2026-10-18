@@ -39,4 +39,4 @@ paths:
   elsewhere link to them.
 - **Foreign folders** (`research/` — other sessions' research or material copied in from outside) —
   read and link, never edit or move.
-- After editing: `py -3.12 tools/context_graph.py check <file>` (the Stop hook does it too).
+- After editing: `bash .claude/hooks/py.sh tools/context_graph.py check <file>` (the Stop hook does it too).

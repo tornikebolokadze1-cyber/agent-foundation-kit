@@ -1,6 +1,10 @@
-# The kit's own pull-request check (owner, 2026-10-11): every PR — and every push to main — runs every gate
-# and the drill on Windows, the system the engine is built for. A green run is what lets a PR merge by itself.
-# Only in this repository: a project made from the template skips this job (its commits are checked by
+# The kit's own pull-request check (owner, 2026-10-11; macOS and Linux added 2026-10-18): every PR — and every push
+# to main — runs every gate and the drill on Windows, Ubuntu and macOS with Python 3.12, the engine's floor, and once
+# more on Ubuntu with Python 3.13. The drill cases that still wait to be pasted into drill.py run here too
+# (tools/gates/drill_additions.py — the commit check does not run them yet). The job named `gates` is the required
+# check: it passes only when every system passed, so a red macOS or Linux run stops the merge exactly as a red Windows
+# run does.
+# Only in this repository: a project made from the template skips these jobs (its commits are checked by
 # .githooks/pre-commit on the person's own machine), so nobody's Actions minutes are spent.
 name: gates
 
@@ -17,9 +21,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  gates:
+  system:
     if: github.repository == 'tornikebolokadze1-cyber/agent-foundation-kit'
-    runs-on: windows-latest
+    name: gates on ${{ matrix.os }}, Python ${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: macos-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.13" }
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -28,7 +41,13 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
+      - name: The launcher finds a Python by itself
+        shell: bash
+        run: bash .claude/hooks/py.sh -c "import sys; print(sys.executable, sys.version.split()[0])"
+      - name: The launcher runs under macOS's own bash 3.2
+        if: runner.os == 'macOS'
+        run: /bin/bash .claude/hooks/py.sh -c "import sys; print(sys.executable, sys.version.split()[0])"
       - name: Every gate and the drill
         shell: bash
         env:
@@ -36,4 +55,23 @@ jobs:
         run: |
           export ENGINE_PYTHON="$(command -v python)"
           "$ENGINE_PYTHON" --version
-          "$ENGINE_PYTHON" tools/gates/gate.py
+          bash .claude/hooks/py.sh tools/gates/gate.py
+      - name: The drill cases that wait for drill.py
+        shell: bash
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          export ENGINE_PYTHON="$(command -v python)"
+          bash .claude/hooks/py.sh tools/gates/drill_additions.py
+
+  gates:
+    if: always() && github.repository == 'tornikebolokadze1-cyber/agent-foundation-kit'
+    needs: system
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every system passed
+        env:
+          RESULT: ${{ needs.system.result }}
+        run: |
+          echo "systems: $RESULT"
+          test "$RESULT" = "success"

@@ -60,7 +60,7 @@ Skills may create new skills only after the owner says yes to a proposal in `mem
 `spec-reviewer` (before a spec goes to the owner) · `verifier` (before calling anything done) · the
 `critic-correctness` / `critic-security` / `critic-quality` lenses and `refuter` for code and claims — all six in
 `.claude/agents/`.
-Checker models of another family (Sol, Astra) come in through `orchestration/` once it is enabled.
+Orchestration checkers (`orchestration/`, stage 1: Claude only) come in once it is enabled.
 **Size and model (ADR-0010):** one narrow question, a bounded reading list, a short answer — keep a subagent's
 context under ~100K tokens. `model: "haiku"` for search, listing and reading facts out of files with a short
 English answer, Georgian files included (the engine author's measurement, 2026-10-13: on 20 such questions as accurate

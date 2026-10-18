@@ -1,14 +1,14 @@
 ---
 id: review
 type: guide
-title: REVIEW — რას ამოწმებს ყოველი review (ადამიანი, subagent, Sol, Astra)
+title: REVIEW — რას ამოწმებს ყოველი review (ადამიანი, subagent, ორკესტრაციის checker)
 ---
 
 # REVIEW.md
 
-> **მფლობელისთვის:** ეს ფაილი მიმომხილველებისთვისაა — `spec-reviewer` და `verifier` subagent-ებისთვის, ChatGPT Sol-ისა და Astra-სთვის (ორკესტრაციაში) და ნებისმიერი ადამიანისთვის. ის ამბობს, რას ვამოწმებთ, რამდენად მძიმეა შეცდომა და რა ფორმით ვწერთ დასკვნას. ინგლისურადაა, რადგან მოდელებისთვის უფრო ზუსტია; გადაწყვეტილება: [[ADR-0006-deterministic-gates-and-evals]].
+> **მფლობელისთვის:** ეს ფაილი მიმომხილველებისთვისაა — `spec-reviewer` და `verifier` subagent-ებისთვის, ორკესტრაციის checker-ებისთვის (I ეტაპზე — Opus 5.5 და Sonnet 5.5) და ნებისმიერი ადამიანისთვის. ის ამბობს, რას ვამოწმებთ, რამდენად მძიმეა შეცდომა და რა ფორმით ვწერთ დასკვნას. ინგლისურადაა, რადგან მოდელებისთვის უფრო ზუსტია; გადაწყვეტილება: [[ADR-0006-deterministic-gates-and-evals]].
 
-This file is the review contract for this repository. Machine checks come first: a review never overrides a failing gate (`py -3.12 tools/gates/gate.py`), and a finding counts only when it is located (file:line or section/ID) and evidenced.
+This file is the review contract for this repository. Machine checks come first: a review never overrides a failing gate (`bash .claude/hooks/py.sh tools/gates/gate.py`), and a finding counts only when it is located (file:line or section/ID) and evidenced.
 
 ## Severity — only CRITICAL and HIGH block
 
@@ -48,4 +48,4 @@ fix: <smallest change that resolves it>
 VERDICT: approve | changes-requested | blocked
 ```
 
-Architecture checker (Astra) ends with `POSITION: agree | agree-with-changes | disagree` instead of VERDICT, after stating the alternative it would choose and why.
+The architecture checker ends with `POSITION: agree | agree-with-changes | disagree` instead of VERDICT, after stating the alternative it would choose and why. Both lines are the answer's last line, exactly: a run without it counts as failed (`orchestration/run.py`).
