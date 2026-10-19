@@ -157,7 +157,7 @@ def notable_kind(seg: list[str], word: str, start: int) -> str | None:
 def notable_commands(cmd: str, depth: int = 0) -> list[tuple[str, str]]:
     """(kind, the command segment) for every segment that writes git history, installs, deletes or goes to the
     network — segment by segment, into nested shells, eval and $(…), with `cat <<EOF` bodies read as text."""
-    cmd = guard.strip_cat_heredocs(cmd)
+    cmd = guard.heredocs(cmd)[0]
     out: list[tuple[str, str]] = []
     if depth < guard.MAX_NESTING:
         for inner in guard.substitutions(cmd):

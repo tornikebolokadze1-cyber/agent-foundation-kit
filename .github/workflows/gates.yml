@@ -1,9 +1,8 @@
 # The kit's own pull-request check (owner, 2026-10-11; macOS and Linux added 2026-10-18): every PR — and every push
 # to main — runs every gate and the drill on Windows, Ubuntu and macOS with Python 3.12, the engine's floor, and once
-# more on Ubuntu with Python 3.13. The drill cases that still wait to be pasted into drill.py run here too
-# (tools/gates/drill_additions.py — the commit check does not run them yet). The job named `gates` is the required
-# check: it passes only when every system passed, so a red macOS or Linux run stops the merge exactly as a red Windows
-# run does.
+# more on Ubuntu with Python 3.13 (since 2026-10-19 every drill case lives in tools/gates/drill.py, which gate.py runs).
+# The job named `gates` is the required check: it passes only when every system passed, so a red macOS or Linux run
+# stops the merge exactly as a red Windows run does.
 # Only in this repository: a project made from the template skips these jobs (its commits are checked by
 # .githooks/pre-commit on the person's own machine), so nobody's Actions minutes are spent.
 name: gates
@@ -56,13 +55,6 @@ jobs:
           export ENGINE_PYTHON="$(command -v python)"
           "$ENGINE_PYTHON" --version
           bash .claude/hooks/py.sh tools/gates/gate.py
-      - name: The drill cases that wait for drill.py
-        shell: bash
-        env:
-          PYTHONUTF8: "1"
-        run: |
-          export ENGINE_PYTHON="$(command -v python)"
-          bash .claude/hooks/py.sh tools/gates/drill_additions.py
 
   gates:
     if: always() && github.repository == 'tornikebolokadze1-cyber/agent-foundation-kit'

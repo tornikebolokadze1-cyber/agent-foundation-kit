@@ -1,8 +1,7 @@
 """How the engine starts a nested Claude Code session: which `claude`, and what its process may inherit.
 
-Used by orchestration/run.py (ADR-0005). The caller adds tools/ to sys.path.
-.claude/hooks/episodic.py still has its own search for the SessionEnd summary (without Homebrew's folders); it moves
-here later.
+Used by orchestration/run.py (ADR-0005) and .claude/hooks/episodic.py (the summary of a session that ended without
+/session-close). The caller adds tools/ to sys.path.
 """
 from __future__ import annotations
 

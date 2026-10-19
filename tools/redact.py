@@ -33,6 +33,7 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
                                r"(?:[\s\S]{0," + str(PEM_FOOTER_WITHIN) + r"}?-----END " + PEM_LABEL + r"-----"
                                r"|" + PEM_BODY_LINE + r"*(?:\r?\n-----END " + PEM_LABEL + r"-----)?)")),
     ("anthropic-key", re.compile(r"\bsk-ant-[a-z]{3,5}\d{2}-[A-Za-z0-9_-]{20,}")),
+    ("openrouter-key", re.compile(r"\bsk-or-v1-[0-9a-fA-F]{32,}")),
     ("openai-key", re.compile(r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|\bsk-[A-Za-z0-9]{40,}")),
     ("github-token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{30,}")),
     ("aws-access-key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
@@ -52,9 +53,11 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("url-credential", re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:(?P<secret>[^\s/:@]+)@")),
 ]
 
-# A line that announces itself as fake is documentation, not a leak.
-DECOY_RE = re.compile(r"EXAMPLE|PLACEHOLDER|YOUR_|<your|xxxx|XXXX|REDACTED|dummy|DUMMY|sample|SAMPLE|"
-                      r"changeme|CHANGEME|FAKE|fake")
+# A line that announces itself as fake is documentation, not a leak. A decoy word counts only as a word of its own
+# (`EXAMPLE_KEY` yes, `resampled` or a random key's letters no), and "sample" not at all: a URL beside a real key
+# (`…/v1/sample?key=…`) must not pass it off as documentation (review M9, 2026-10-13).
+DECOY_RE = re.compile(r"(?<![A-Za-z0-9])(?:EXAMPLE|PLACEHOLDER|REDACTED|dummy|DUMMY|changeme|CHANGEME|FAKE|fake)"
+                      r"(?![A-Za-z0-9])|\bYOUR_|<your|x{4,}|X{4,}")
 
 # Characters that hide text from a human reader but not from a model (Unicode tag block = "ASCII
 # smuggling"; bidirectional controls = "Trojan Source"). Ordinary text — Georgian included — has neither.

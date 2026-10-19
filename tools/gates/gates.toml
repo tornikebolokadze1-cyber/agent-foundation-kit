@@ -1,9 +1,9 @@
 # Deterministic gates — the machine checks that do not depend on any model's judgement.
 #
-# Run:   py -3.12 tools/gates/gate.py                 (every enabled gate, whole project)
-#        py -3.12 tools/gates/gate.py --pre-commit    (what .githooks/pre-commit runs)
-#        py -3.12 tools/gates/gate.py --files a b     (only these files; used by the Stop hook)
-#        py -3.12 tools/gates/gate.py --list          (show every gate, including the switched-off ones)
+# Run:   bash .claude/hooks/py.sh tools/gates/gate.py                 (every enabled gate, whole project)
+#        bash .claude/hooks/py.sh tools/gates/gate.py --pre-commit    (what .githooks/pre-commit runs)
+#        bash .claude/hooks/py.sh tools/gates/gate.py --files a b     (only these files; used by the Stop hook)
+#        bash .claude/hooks/py.sh tools/gates/gate.py --list          (every gate, the switched-off ones too)
 #
 # Exit: 0 = every enabled gate passed · 1 = something failed · 2 = inconclusive (a gate could not
 # run, e.g. git could not list the staged files). A switched-off gate prints SKIP, and SKIP is NOT a pass — the
@@ -19,7 +19,9 @@
 #   - never lower a threshold or disable a gate to make a red run green; fix the cause
 #   - every new gate gets a seeded-defect drill in tools/gates/drill.py (ADR-0006)
 #   - `builtin` names a checker inside gate.py; `cmd` runs a command given as an argument list, without
-#     a shell (exit 0 = pass; a command that is not installed is INCONCLUSIVE, never a pass)
+#     a shell (exit 0 = pass; a command that is not installed is INCONCLUSIVE, never a pass). In a `cmd`,
+#     gate.py fills in `{venv_python}` (the project's .venv: .venv/Scripts/python on Windows, .venv/bin/python
+#     on macOS and Linux) and `{python}` (the engine's own Python, the one running gate.py)
 
 [[gate]]
 id = "graph"
@@ -37,7 +39,7 @@ enabled = true
 builtin = "json"
 pre_commit = true
 stop = true
-what = "every project .json parses (settings, Obsidian config, eval data)"
+what = "every project .json parses (settings, Obsidian config, eval data); tsconfig/jsconfig and .vscode/.devcontainer files as JSON with comments; the product's own code folder is left to its lint"
 
 [[gate]]
 id = "toml"
@@ -64,7 +66,7 @@ enabled = true
 builtin = "shell"
 pre_commit = true
 stop = true
-what = "every shell script passes bash -n (syntax)"
+what = "every shell script passes bash -n (syntax); a .githooks hook is stored in git as executable (100755)"
 
 [[gate]]
 id = "eol"
@@ -115,12 +117,12 @@ what = "tools/gates/drill.py: every guard, hook and gate is broken on purpose an
 # Switched on at the start of stage 4, with the person's yes, using the commands the stack ADR records — the
 # project type's guide (docs/guides/<kind>.md §2) lists them per stack. Point them at the project's own code
 # (e.g. `src`, `site`), never at the engine's tools/; `unit` goes on with the first test — an empty run proves nothing.
-# A Python stack runs from the project's own virtual environment (.venv/Scripts/python), never the global Python.
+# A Python stack runs from the project's own virtual environment (`{venv_python}`), never the global Python.
 [[gate]]
 id = "lint"
 level = 1
 enabled = false
-cmd = [".venv/Scripts/python", "-m", "ruff", "check", "src"]
+cmd = ["{venv_python}", "-m", "ruff", "check", "src"]
 pre_commit = true
 reason = "no project code yet — the stack ADR names the linter and its command (e.g. `npm run lint` for a Node stack)"
 what = "the stack's linter: lint errors are failures"
@@ -129,7 +131,7 @@ what = "the stack's linter: lint errors are failures"
 id = "unit"
 level = 1
 enabled = false
-cmd = [".venv/Scripts/python", "-m", "pytest", "-q"]
+cmd = ["{venv_python}", "-m", "pytest", "-q"]
 pre_commit = true
 reason = "no tests yet — switched on together with the first test (e.g. `npm test` for a Node stack)"
 what = "the stack's tests: every unit test passes"
@@ -139,7 +141,7 @@ what = "the stack's tests: every unit test passes"
 id = "evals-georgian"
 level = 2
 enabled = false
-cmd = ["py", "-3.12", "evals/run.py", "--suite", "georgian", "--gate"]
+cmd = ["{python}", "evals/run.py", "--suite", "georgian", "--gate"]
 reason = "the agent does not exist yet; the suite is written from the first spec (see evals/README.md)"
 what = "Georgian regression: deterministic ≥95%, adversarial ≥95%, grammar ≥4.3/5"
 
@@ -147,7 +149,7 @@ what = "Georgian regression: deterministic ≥95%, adversarial ≥95%, grammar �
 id = "evals-grounding"
 level = 2
 enabled = false
-cmd = ["py", "-3.12", "evals/run.py", "--suite", "grounding", "--gate"]
+cmd = ["{python}", "evals/run.py", "--suite", "grounding", "--gate"]
 reason = "the agent does not exist yet"
 what = "zero violations of the domain invariants in REVIEW.md; every factual claim traceable to its source"
 
@@ -166,4 +168,4 @@ level = 3
 enabled = false
 cmd = ["npx", "playwright", "test"]
 reason = "no web surface yet"
-what = "end-to-end conversation flows pass in a real browser"
+what = "end-to-end: the product's main flows pass in a real browser (a site, a web game, a web interface)"

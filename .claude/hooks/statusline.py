@@ -86,9 +86,18 @@ def base_command() -> str:
     return str(sl.get("command") or "").strip() if isinstance(sl, dict) and sl.get("type") == "command" else ""
 
 
+def _is_wsl_bash(p: str) -> bool:
+    """Windows' System32/WindowsApps bash.exe is the WSL launcher — it drops Windows env vars and paths."""
+    return os.name == "nt" and p.replace("\\", "/").lower().endswith(
+        ("/system32/bash.exe", "/system32/bash.bat", "/sysnative/bash.exe", "/windowsapps/bash.exe"))
+
+
 def trusted_bash() -> str | None:
-    """bash from PATH — never one inside this project, where a file could have been planted."""
+    """bash from PATH (or Git for Windows when PATH only has the WSL shim) — never one inside this project."""
     found = shutil.which("bash")
+    if found and _is_wsl_bash(found):
+        git_bash = r"C:\Program Files\Git\bin\bash.exe"
+        found = git_bash if Path(git_bash).exists() else None
     if not found:
         return None
     try:

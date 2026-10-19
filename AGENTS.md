@@ -13,7 +13,7 @@ prompt-cache measurement, the status line, dormant maker–checker orchestration
 code → gates → review loop. What the product does, for whom and where it must stop is the owner's to define in
 `intent.md`: their idea goes into §1 at once, the interview fills the rest (draft until `/approve intent`).
 Where the project stands and what comes next: the stage block at every session start
-(`py -3.12 tools/context_graph.py stage`). Domain facts live in `docs/domain/`, each dated and sourced —
+(`bash .claude/hooks/py.sh tools/context_graph.py stage`). Domain facts live in `docs/domain/`, each dated and sourced —
 re-verify a fact before building on it, and never present model memory as a verified fact (a law, a price, a
 rule).
 

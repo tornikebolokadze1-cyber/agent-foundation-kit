@@ -40,8 +40,8 @@ Environment (drills set these so they never touch real state):
   EPISODIC_STATE_DIR   counter / log directory (default: ~/.claude/session-state)
   EPISODIC_AUTOSUMMARY "0" = never call a model; the episode says so explicitly
   EPISODIC_NESTED      "1" = exit at once (set for every nested claude call)
-  EPISODIC_CLAUDE_BIN  command for the claude CLI (default: the native install in
-                       ~/.local/bin, then `claude` on PATH — see find_claude);
+  EPISODIC_CLAUDE_BIN  command for the claude CLI (default: tools/claude_cli.py's search —
+                       the native install in ~/.local/bin, then PATH, then Homebrew on macOS);
                        may contain arguments, forward slashes only
   EPISODIC_CATCHUP_HOURS  idle hours before an open episode is caught up (default 6)
   EPISODIC_COMPACT_WAIT_S seconds compact-verify waits for the summary (default 120)
@@ -53,7 +53,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,7 +68,8 @@ for _stream in (sys.stdin, sys.stdout, sys.stderr):
 CODE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(CODE_ROOT / "tools"))
 import redact  # noqa: E402 — the summarizer is a model; its text is scrubbed of secrets before it reaches disk
-from context_graph import parse_frontmatter, set_field  # noqa: E402
+import claude_cli  # noqa: E402 — which claude, and what a nested session may inherit (shared with orchestration/run.py)
+from context_graph import parse_frontmatter, printable, set_field  # noqa: E402
 
 WORKING_LINES = 60            # cap per injected block
 TRANSCRIPT_CHARS = 60_000     # cap on transcript text handed to the summariser (the END is kept)
@@ -346,20 +346,19 @@ def transcript_text(path: str, since: dt.datetime | None = None) -> tuple[str, i
 
 
 def find_claude() -> list[str] | None:
-    """The claude CLI as an argument list: EPISODIC_CLAUDE_BIN, then the native install, then PATH.
+    """The claude CLI as an argument list: EPISODIC_CLAUDE_BIN, then tools/claude_cli.py's search. None when no claude
+    was found anywhere.
 
     The native installer puts the binary in ~/.local/bin, which on Windows is often NOT on the PATH a
     hook inherits (a session started from VS Code or Windows Terminal), while an old npm shim that only
     prints "claude native binary not installed" can be (found on a Windows machine, 2026-09-19). So the
-    native location is tried before PATH."""
+    native location is tried before PATH, and on macOS Homebrew's folders after it (an app started from
+    the Dock has none of them on PATH)."""
     explicit = os.environ.get("EPISODIC_CLAUDE_BIN")
     if explicit:
         return shlex.split(explicit)
-    native = Path.home() / ".local" / "bin" / ("claude.exe" if os.name == "nt" else "claude")
-    if native.is_file():
-        return [str(native)]
-    found = shutil.which("claude")
-    return [found] if found else None
+    found = claude_cli.find_claude()
+    return None if found == ["claude"] else found  # the bare name means none was found: say so rather than run it
 
 
 def call_model(text: str) -> tuple[dict | None, str]:
@@ -367,15 +366,14 @@ def call_model(text: str) -> tuple[dict | None, str]:
         return None, "ავტო-შეჯამება გამორთულია (EPISODIC_AUTOSUMMARY=0)"
     base = find_claude()
     if not base:
-        return None, "claude CLI ვერ მოიძებნა (EPISODIC_CLAUDE_BIN, ~/.local/bin, PATH)"
+        return None, "claude CLI ვერ მოიძებნა (EPISODIC_CLAUDE_BIN, ~/.local/bin, PATH, macOS-ზე Homebrew)"
     log(f"summarizer: {base[0]}")  # name the binary actually used (ADR-0006)
     cmd = base + [
         "-p", SUMMARY_PROMPT, "--restricted", "--strict-mcp-config", "--tools", "",
         "--model", "sonnet", "--no-session-persistence", "--output-format", "json",
         "--json-schema", json.dumps(SUMMARY_SCHEMA, ensure_ascii=False),
     ]
-    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-    env["EPISODIC_NESTED"] = "1"
+    env = claude_cli.nested_env()  # no other service's key, no CLAUDECODE, and EPISODIC_NESTED=1
     # The transcript is untrusted data (it quotes web pages, tool output, other people's text): fence it,
     # and keep it from closing the fence itself. The call also has no tools, so the worst a planted
     # instruction can do is skew a summary that is already flagged "(ავტო — გადასამოწმებელი)".
@@ -425,12 +423,22 @@ def append_proposals(root: Path, ep_id: str, proposals: list[str]) -> int:
     text = read(p)
     nums = [int(n) for n in re.findall(r"\bP-(\d{3,})\b", text)]
     nxt = max(nums, default=0) + 1
-    added = []
+    # A summary that opens a proposal with an id the project already has (P-NNN in PROPOSALS.md, D-NNN in tasks/,
+    # L-NNN in LESSONS.md) is repeating it, not proposing: it went in under a new number three times (2026-10-18).
+    known = text + "".join(read(f) for f in [*sorted((root / "tasks").glob("*.md")), root / "memory" / "LESSONS.md"]
+                           if f.is_file())
+    added, repeated = [], []
     for prop in proposals:
         prop = " ".join(str(prop).split())
+        said = re.match(r"\W*([PDL]-\d{3,})\b", prop)
+        if said and re.search(rf"\b{said.group(1)}\b", known):
+            repeated.append(said.group(1))
+            continue
         if prop and prop not in text:
             added.append(f"- [ ] **P-{nxt:03d}** {prop} _(ავტო, [[{ep_id}]] — მფლობელის გადასაწყვეტი)_")
             nxt += 1
+    if repeated:
+        log(f"proposals of {ep_id}: {', '.join(repeated)} already in the project — not added again")
     if added:
         marker = "<!-- auto: proposals:end -->"
         block = "\n".join(added) + "\n"
@@ -491,7 +499,10 @@ def cmd_start(payload: dict) -> int:
         f"### დავალებები — `tasks/todo.md`\n\n{clip(tasks, WORKING_LINES) or '_ბლოკი ცარიელია ან აკლია_'}\n\n"
         "### სესიის ფაქტები\n\n" + "\n".join(facts)
     )
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": ctx}}, ensure_ascii=False))
+    # The blocks and titles are text from files; a control or hidden character in them reaches the model as is
+    # unless it is taken out here (review M7).
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": printable(ctx)}},
+                     ensure_ascii=False))
     return 0
 
 
@@ -748,6 +759,11 @@ def summarize_episode(root: Path, f: Path, payload: dict) -> None:
     if len(body) < 300:
         append(f, "\n> ავტო-შეჯამება არ დასჭირდა: სესია ძალიან მოკლე იყო.\n")
         return
+    # The summarizer is a model too: a credential in the transcript is hidden before the call, not only in the reply
+    # afterwards (review M7).
+    body, kinds = redact.redact(body)
+    if kinds:
+        log(f"summarize {f.stem}: redacted {len(kinds)} secret(s) {sorted(set(kinds))} before the model call")
     so, why = call_model(body)
     if so is None:
         append(f, f"\n> ⚠ ავტო-შეჯამება ვერ შესრულდა: {why}. გადაამოწმე `/session-close`-ით.\n")
@@ -813,7 +829,10 @@ def catchup(root: Path, current_sid: str) -> list[str]:
         if empty_session(text, tp):
             remove_empty_stub(root, p, "catch-up")
             continue
-        update_fields(p, status="closed", closed_by="auto")
+        # A session /session-close closed that then went on keeps that mark: its summary covers only what came after
+        # the close, not the whole session a second time (2026-10-18)
+        kept = {} if fm_get(text, "closed_by") == "session-close" else {"closed_by": "auto"}
+        update_fields(p, status="closed", **kept)
         append(p, f"\n## დახურვა — {iso()} (catch-up: {idle_h:.0f}სთ უმოქმედოდ, სესია არ დაიხურა ნორმალურად)\n")
         pfile = save_payload({"session_id": fm_get(text, "session"), "transcript_path": tp,
                               "episode": str(p), "reason": "catch-up"}, p.stem[-8:])

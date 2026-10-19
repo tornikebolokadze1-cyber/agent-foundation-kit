@@ -64,7 +64,9 @@ Orchestration checkers (`orchestration/`, stage 1: Claude only) come in once it 
 **Size and model (ADR-0010):** one narrow question, a bounded reading list, a short answer — keep a subagent's
 context under ~100K tokens. `model: "haiku"` for search, listing and reading facts out of files with a short
 English answer, Georgian files included (the engine author's measurement, 2026-10-13: on 20 such questions as accurate
-as Sonnet at ~1/8 of the cost); Sonnet for long summaries, judgement and anything Georgian (L-006); Opus for checks.
+as Sonnet at ~1/8 of the cost); Sonnet for long summaries, judgement and anything Georgian (L-006). The six agents
+carry their own `model:` line: Opus for the correctness and security lenses; Sonnet for the quality lens, the refuter
+and the spec reviewer; Haiku for the verifier, which only runs the gates and compares their lines with the claims.
 
 ### Talking to the owner
 Georgian, connected prose, simple words; gloss a technical term the first time (e.g. „gate (მანქანური
