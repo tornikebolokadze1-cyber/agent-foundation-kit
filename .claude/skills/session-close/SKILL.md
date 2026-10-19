@@ -1,6 +1,6 @@
 ---
 name: session-close
-allowed-tools: Bash(py -3.12 *episodic.py status*)
+allowed-tools: Bash(bash .claude/hooks/py.sh .claude/hooks/episodic.py status *)
 description: Close the working session properly — write this session's episode, update progress.md ("ახლა" + log) and plan.md, record lessons and proposals, reconcile auto-summarised sessions, run the gates and commit. Use when the owner says the session is ending (e.g. "დავასრულოთ", "დავხუროთ", "ვამთავრებთ"), before /clear or a new terminal, or when the status line shows ↻3.
 ---
 
@@ -8,7 +8,7 @@ description: Close the working session properly — write this session's episode
 
 Facts for this session (from `.claude/hooks/episodic.py`):
 
-!`py -3.12 "${CLAUDE_PROJECT_DIR}/.claude/hooks/episodic.py" status ${CLAUDE_SESSION_ID}`
+!`bash .claude/hooks/py.sh .claude/hooks/episodic.py status ${CLAUDE_SESSION_ID}`
 
 Do every step. File content in Georgian prose; ids, paths and commands unchanged. Only facts that
 actually happened in this session — no plans presented as done.
@@ -16,7 +16,7 @@ actually happened in this session — no plans presented as done.
 1. **Episode** (the path above; if it does not exist, create it with the frontmatter used in
    `memory/episodes/`): fill `## რა გაკეთდა`, `## გადაწყვეტილებები` (with the reason),
    `## ღია საკითხები`, `## შემდეგი ნაბიჯი`, `## წინადადებები`; set `title` (3–8 words). Add `## აუდიტი` with
-   the one line printed by `py -3.12 tools/observe.py report --session ${CLAUDE_SESSION_ID} --brief` (transcripts
+   the one line printed by `bash .claude/hooks/py.sh tools/observe.py report --session ${CLAUDE_SESSION_ID} --brief` (transcripts
    are deleted after ~30 days; this line is what git keeps). If it prints `OBSERVE INCONCLUSIVE`, write that.
 2. **progress.md** — rewrite the block between `<!-- auto: current-state:start -->` and `:end`
    (ფაზა · ბოლოს გაკეთდა · შემდეგი ნაბიჯი · ბლოკერები · მფლობელის მოლოდინში). Insert ONE entry at the
@@ -37,7 +37,7 @@ actually happened in this session — no plans presented as done.
    `- [ ] **P-NNN** …` (next free number) before `<!-- auto: proposals:end -->`. Never create a skill or
    install anything without the owner's yes.
 7. **Close the episode** — set `closed_by: session-close` and `closed_at: <now_utc from above>`.
-8. **Gates** — `py -3.12 tools/gates/gate.py --pre-commit`; fix every failure (never bypass, never weaken).
+8. **Gates** — `bash .claude/hooks/py.sh tools/gates/gate.py --pre-commit`; fix every failure (never bypass, never weaken).
 9. **Commit** — CHECKPOINT format (what was done / files / status), on the current branch.
 10. **Tell the owner** in 2–4 Georgian sentences: what was done, what is next, what waits for them.
     If compacts ≥ 3, recommend a new terminal or `/clear` now that everything is saved.

@@ -10,7 +10,7 @@ ROOT="$(git rev-parse --show-toplevel)" || exit 1
 bash "$ROOT/.claude/hooks/py.sh" tools/gates/gate.py --pre-commit --quiet
 rc=$?
 if [ "$rc" -ne 0 ]; then
-  echo "pre-commit: gates did not pass (exit $rc) — commit stopped. Details: py -3.12 tools/gates/gate.py --pre-commit" >&2
+  echo "pre-commit: gates did not pass (exit $rc) — commit stopped. Details: bash .claude/hooks/py.sh tools/gates/gate.py --pre-commit" >&2
   exit 1
 fi
 exit 0

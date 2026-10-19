@@ -2,7 +2,7 @@
 name: approve
 description: Owner-only. Approve (or reject) a project document — intent, spec, plan or ADR — and record it in memory/approvals.md. Usage /approve [intent | spec N | plan N | adr N | reject adr N reason]; with no arguments it lists what is waiting for the owner.
 disable-model-invocation: true
-allowed-tools: Bash(py -3.12 *tools/approve.py*)
+allowed-tools: Bash(bash .claude/hooks/py.sh tools/approve.py *)
 argument-hint: "[intent | spec N | plan N | adr N | reject adr N <reason>]"
 ---
 
@@ -13,7 +13,7 @@ been applied (or refused). Nothing is waiting for you to approve.
 
 Result:
 
-!`py -3.12 "${CLAUDE_PROJECT_DIR}/tools/approve.py" '$ARGUMENTS'`
+!`bash .claude/hooks/py.sh tools/approve.py '$ARGUMENTS'`
 
 Your job now:
 

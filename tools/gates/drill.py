@@ -51,6 +51,13 @@ TODAY = date.today().isoformat()
 
 results: list[tuple[str, str]] = []
 
+# Git exports the repository's own variables to its hooks (GIT_DIR, GIT_INDEX_FILE … — always in a linked worktree).
+# Inherited by the drill's fixtures, they made every fixture `git init` / `git commit` act on the real repository
+# instead: `git init` turned it bare (core.bare=true) and fixture commits landed on its branch (2026-10-18, a commit
+# from a worktree). The fixtures are repositories of their own, so run() never passes these on.
+GIT_REPO_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+                 "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX", "GIT_QUARANTINE_PATH")
+
 
 def record(state: str, label: str) -> None:
     results.append((state, label))
@@ -69,6 +76,8 @@ def run(cmd: list[str], stdin: str | None = None, env: dict | None = None, cwd: 
         timeout: int = 120) -> tuple[int, str, str]:
     e = dict(os.environ)
     e.pop("CLAUDECODE", None)
+    for var in GIT_REPO_VARS:
+        e.pop(var, None)
     for name, value in (env or {}).items():
         if value is None:  # None removes the variable (Windows names ignore case)
             for key in [k for k in e if k.upper() == name.upper()]:
@@ -1707,6 +1716,25 @@ def g_firstrun(tmp: Path) -> None:
     def hooks_path(root: Path) -> str:
         return run(["git", "-C", str(root), "config", "--local", "--get", "core.hooksPath"],
                    env={"GIT_CONFIG_GLOBAL": str(gcfg)})[1].strip()
+
+    # The drill as git runs it from a hook: GIT_DIR names the real repository (see GIT_REPO_VARS). A canary stands in
+    # for it; firstrun's `git init` must give the fixture its own repository and leave the canary as it was.
+    canary = tmp / "fr-canary"
+    run(["git", "init", "-q", str(canary)])
+    victim = project("fr-canary-victim")
+    outer_git_dir = os.environ.get("GIT_DIR")
+    os.environ["GIT_DIR"] = str(canary / ".git")
+    try:
+        first(victim)
+    finally:
+        if outer_git_dir is None:
+            os.environ.pop("GIT_DIR", None)
+        else:
+            os.environ["GIT_DIR"] = outer_git_dir
+    bare = run(["git", "-C", str(canary), "config", "--get", "core.bare"])[1].strip()
+    expect(bare == "false" and (victim / ".git").is_dir(),
+           "seeded: a git hook's GIT_DIR in the drill's environment → the fixture gets its own repository and the "
+           "repository GIT_DIR names is left alone", f"canary core.bare={bare}, fixture .git={(victim / '.git').is_dir()}")
 
     p = project("fr-new")
     rc, out = first(p)

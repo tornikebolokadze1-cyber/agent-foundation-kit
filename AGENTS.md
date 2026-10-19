@@ -36,10 +36,10 @@ rule).
 | `tools/gates/` | deterministic gates (`gate.py`, `gates.toml`) and their drill |
 | `tools/observe.py` | the observatory: what agents did, read from Claude Code's transcripts (`/observatory`) |
 | `tools/cache_cost.py`, `tools/model_prices.toml` | what the sessions cost: prompt-cache use, rebuilds and their causes, at API list prices (ADR-0010) |
-| `.claude/hooks/statusline.py` | the engine's status line: the owner's own line, the project's stage and when the prompt cache expires (ADR-0010, ADR-0011) |
+| `.claude/hooks/statusline.py` | the status line: the owner's own line, the stage, when the prompt cache expires (ADR-0010, ADR-0011) |
 | `.claude/hooks/firstrun.py` | the first session start in a new project: git repository, commit checks, tool check (ADR-0011) |
 | `.claude/agents/` | subagents: `spec-reviewer`, `verifier`, the three critic lenses, `refuter` |
-| `orchestration/` | maker–checker loops — dormant; the code still holds the earlier version (Fable↔Astra, Opus↔Sol), ADR-0005 moves stage I to Claude models only |
+| `orchestration/` | maker–checker loops (stage 1: Claude only) — dormant (ADR-0005); the dispatcher of ADR-0009 is a decision only, its code is not in this template |
 | `evals/` | behaviour evals (level-2 gates, once the agent exists) |
 | `REVIEW.md` | review contract: severity scale, domain invariants, finding format |
 | `research/` | **foreign** — research a session wrote (read-only once written) or material copied in: read and link, never edit |
@@ -50,12 +50,12 @@ rule).
 2. Specification `docs/specs/SPEC-NNNN-*.md` — testable acceptance criteria; the owner approves it.
 3. Plan `docs/plans/PLAN-NNNN-*.md` — tasks traced to requirements; the owner approves it.
 4. Code, test-first, one task per commit, on a branch.
-5. Gates green: `py -3.12 tools/gates/gate.py` exits 0.
-6. Review against `REVIEW.md` (ChatGPT Sol when orchestration is enabled; max 2 rounds).
+5. Gates green: `gate.py` (Commands) exits 0.
+6. Review against `REVIEW.md` (orchestration checker once enabled; max 2 rounds).
 7. The owner sees the result working.
 
 These steps are `plan.md`'s stages F1–F5 (intent → spec → architecture ADR → plan and build → show).
-`py -3.12 tools/context_graph.py stage` reads the documents' statuses and names the current stage and the next
+`context_graph.py stage` reads the documents' statuses and names the current stage and the next
 step — it stores nothing and adds no stage of its own (ADR-0011). A new project starts from the person's idea,
 with no setup step: see CLAUDE.md.
 
@@ -68,13 +68,14 @@ Work of three or more steps goes into `tasks/todo.md` first (`- [ ] D-NNN — wh
 ## Commands
 
 ```bash
-py -3.12 tools/gates/gate.py              # all gates — exit 0 pass / 1 fail / 2 inconclusive
-py -3.12 tools/gates/drill.py             # break every check on purpose; all must be ARMED
-py -3.12 tools/context_graph.py check     # links, frontmatter, statuses, approval chain, ledger
-py -3.12 tools/context_graph.py query <id-or-stem>
-py -3.12 tools/context_graph.py pending   # documents waiting for the owner
-py -3.12 tools/context_graph.py stage     # where the project stands (F1–F5) and what comes next
-py -3.12 orchestration/run.py status
+# py.sh finds Python 3.12+ on Windows, macOS and Linux
+bash .claude/hooks/py.sh tools/gates/gate.py           # all gates: exit 0 pass / 1 fail / 2 inconclusive
+bash .claude/hooks/py.sh tools/gates/drill.py          # break every check on purpose; all must be ARMED
+bash .claude/hooks/py.sh tools/context_graph.py check  # links, frontmatter, statuses, approvals
+bash .claude/hooks/py.sh tools/context_graph.py query <id-or-stem>
+bash .claude/hooks/py.sh tools/context_graph.py pending  # waiting for the owner
+bash .claude/hooks/py.sh tools/context_graph.py stage  # the project's stage (F1–F5) and next step
+bash .claude/hooks/py.sh orchestration/run.py status
 ```
 
 ## Boundaries
@@ -101,7 +102,7 @@ Typed frontmatter by location (spec, plan, adr, domain, episode…); links name 
 `[[ADR-0003-context-graph-obsidian]]`, a README by path `[[memory/README]]`, quoted inside frontmatter.
 Full rules: `.claude/rules/knowledge-files.md`. The `graph` gate enforces them.
 
-## For checker models (ChatGPT Astra / Sol)
+## For checker models
 
 You run read-only. Verify the maker's claims against the files instead of trusting them. Follow
 `REVIEW.md`: located and evidenced findings, its severity scale, and the exact final `VERDICT:` (code) or

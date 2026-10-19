@@ -12,7 +12,7 @@ argument-hint: "SPEC-NNNN | execute PLAN-NNNN"
 missing. (`approve.py` refuses a plan on an unapproved spec, and the CHAIN-PLAN gate fails.)
 
 1. Read the spec, its linked ADRs, `docs/domain/*.md`, `REVIEW.md`, and
-   `py -3.12 tools/context_graph.py query <SPEC stem>`.
+   `bash .claude/hooks/py.sh tools/context_graph.py query <SPEC stem>`.
 2. If the plan needs a decision that no accepted ADR covers (stack, data store, hosting, channel,
    model), write that ADR first with `/adr` — the plan links to it and waits for its approval.
 3. Create `docs/plans/PLAN-NNNN-<slug>.md` from [template.md](template.md), `status: draft`,
@@ -23,7 +23,7 @@ missing. (`approve.py` refuses a plan on an unapproved spec, and the CHAIN-PLAN 
    needs is named in the task, so the person's yes is asked once, when that task starts.
 4. List which gates must be green, which new gates or eval cases this plan adds (each with a drill),
    and the rollback path.
-5. Add a row to `docs/plans/README.md`; run `py -3.12 tools/context_graph.py check <file>`.
+5. Add a row to `docs/plans/README.md`; run `bash .claude/hooks/py.sh tools/context_graph.py check <file>`.
 6. Tell the owner in Georgian what will be built, in what order, and how they will see it working;
    the decision is `/approve plan NNNN`.
 
@@ -35,12 +35,12 @@ missing. (`approve.py` refuses a plan on an unapproved spec, and the CHAIN-PLAN 
    (an empty test run proves nothing) — once that test passes, because the commit check runs `unit` and a
    red test cannot be committed. It is a protected file, so Claude Code asks the person — ask first, in one
    sentence saying why to say yes, and never ask them to edit it by hand.
-2. For each task: write the test/eval and run it — see it fail — then the code → `py -3.12 tools/gates/gate.py`
+2. For each task: write the test/eval and run it — see it fail — then the code → `bash .claude/hooks/py.sh tools/gates/gate.py`
    green → tick the box → CHECKPOINT commit. Then go straight on to the next task in the same reply; stop
    only when the person is needed (a yes for an install or a protected file, an account, a decision, or a
    result to look at) — never end a reply with "I'll start the next task" and wait.
 3. If orchestration is enabled (`orchestration/config.toml`): after the task's code is ready, run
-   `py -3.12 orchestration/run.py code-check --plan PLAN-NNNN --task T<n>` (the owner is asked).
+   `bash .claude/hooks/py.sh orchestration/run.py code-check --plan PLAN-NNNN --task T<n>` (the owner is asked).
    Fix critical/high findings; at most 2 rounds — after that report open findings as UNVERIFIED.
 4. Any change of approach → append a dated line under `## გადახრები` (what and why). A change of scope
    → stop, reopen the plan (status only → draft) and ask the owner.

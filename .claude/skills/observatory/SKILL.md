@@ -2,13 +2,13 @@
 name: observatory
 description: Show the owner what the agents did in this project — every tool call, changed file, notable command, web and MCP use, what the guard and the sentinel refused or hid, permission denials, token use and what it cost (prompt cache, rebuilds and their causes) — read from Claude Code's own session transcripts by tools/observe.py and explained in Georgian. Use when the owner asks what an agent did, wants an audit or the "AI observatory" view, asks about security events, or before /session-close.
 argument-hint: "[session-id prefix | last | days N]"
-allowed-tools: Bash(py -3.12 tools/observe.py*)
+allowed-tools: Bash(bash .claude/hooks/py.sh tools/observe.py), Bash(bash .claude/hooks/py.sh tools/observe.py *)
 ---
 
 # /observatory — what the agents did, in Georgian
 
-1. Run `py -3.12 tools/observe.py report --session ${CLAUDE_SESSION_ID}` — or, with the owner's argument, a session
-   id prefix or `last`; for "the last N days" run `py -3.12 tools/observe.py sessions --days N`.
+1. Run `bash .claude/hooks/py.sh tools/observe.py report --session ${CLAUDE_SESSION_ID}` — or, with the owner's argument, a session
+   id prefix or `last`; for "the last N days" run `bash .claude/hooks/py.sh tools/observe.py sessions --days N`.
 2. Exit 2 (`OBSERVE INCONCLUSIVE`) means nothing was proved — say so plainly; never present it as "nothing happened".
 3. Explain to the owner in 2–4 connected Georgian paragraphs: how much was done; which files changed and why (name the
    task `D-NNN` or plan task it served); every line under "ბრძანებები, რომლებსაც ყურადღება სჭირდება"; every security

@@ -27,7 +27,7 @@ related:
    - **1 — სტეკის ADR-თან ერთად:** `ruff`, `pytest`.
    - **2 — როცა აგენტი პასუხობს:** evals — ქართული (deterministic ≥95%, adversarial ≥95%, გრამატიკა ≥4.3/5; ნაკრები პირველი სპეციფიკაციიდან იწერება) და grounding-ის ინვარიანტები (დომენის ურღვევი წესები — [[REVIEW]]) — [[evals/README]].
    - **3 — საჯარო პილოტამდე:** დამოკიდებულებების აუდიტი, SAST, e2e.
-3. **სად ეშვება:** `.githooks/pre-commit` (`core.hooksPath=.githooks`, მხოლოდ ამ რეპოს ლოკალური კონფიგი) ყოველ commit-ზე; Stop hook — სესიის მიერ შეცვლილ ფაილებზე ყოველი ტურის ბოლოს; ხელით — `py -3.12 tools/gates/gate.py`. მოგვიანებით — CI (P-003).
+3. **სად ეშვება:** `.githooks/pre-commit` (`core.hooksPath=.githooks`, მხოლოდ ამ რეპოს ლოკალური კონფიგი) ყოველ commit-ზე; Stop hook — სესიის მიერ შეცვლილ ფაილებზე ყოველი ტურის ბოლოს; ხელით — `bash .claude/hooks/py.sh tools/gates/gate.py`. მოგვიანებით — CI (P-003).
 4. **დრილი:** `tools/gates/drill.py` ყოველ gate-ს, guard-ის წესს და hook-ს ჯერ სუფთა კონტროლზე უშვებს (უნდა გაიაროს), მერე განზრახ ჩადებულ დეფექტზე (უნდა ჩავარდეს **საკუთარი** მარკერით, არა ნებისმიერი ტექსტით). `--self-test` თავად დრილს ამოწმებს: ყველა შემოწმებას „ყოველთვის წარმატებული" stub-ით ცვლის — დრილმა მაშინ DEAD უნდა თქვას, თორემ ის რეზინის ბეჭედია.
 5. **წესები:** ზღვარი არასდროს დაიწევს და gate არ გამოირთვება „გასამწვანებლად"; `--no-verify` აკრძალულია (deny + guard B2); ყოველ ახალ gate-ს დრილი მოჰყვება; gates-ის ფაილები დაცულია (ask).
 6. **კოდის review მოდელებით** (Sol, critic-ები) — დამატებითი ფენაა, არა ჩანაცვლება: CRITICAL/HIGH ბლოკავს, ორზე მეტი შესწორების ბრუნი არ არის — შემდეგ „UNVERIFIED" და მფლობელი.
@@ -46,4 +46,4 @@ related:
 
 ## დადასტურება
 
-`py -3.12 tools/gates/drill.py` — ყველა ARMED (exit 0); `py -3.12 tools/gates/drill.py --self-test` — stub-ებით DEAD (დრილი ცოცხალია).
+`bash .claude/hooks/py.sh tools/gates/drill.py` — ყველა ARMED (exit 0); `bash .claude/hooks/py.sh tools/gates/drill.py --self-test` — stub-ებით DEAD (დრილი ცოცხალია).

@@ -10,7 +10,7 @@ argument-hint: "<the feature in a few words> | revise SPEC-NNNN"
 comes first (a spec cannot be approved before that — `approve.py` refuses and the CHAIN gate fails).
 
 1. **Context** — goals G* and non-goals in `intent.md`, `docs/domain/*.md`, accepted ADRs
-   (`docs/adr/README.md`), existing specs; `py -3.12 tools/context_graph.py query intent`.
+   (`docs/adr/README.md`), existing specs; `bash .claude/hooks/py.sh tools/context_graph.py query intent`.
 2. **New file** — next free number `SPEC-NNNN`; `docs/specs/SPEC-NNNN-<english-kebab-slug>.md` from
    [template.md](template.md). Revising an approved spec: reopen it first (status only → draft).
 3. **Fill every section.** Requirements `REQ-NNN` each trace to a goal G*. Acceptance criteria are
@@ -25,7 +25,7 @@ comes first (a spec cannot be approved before that — `approve.py` refuses and 
    `status: review`.
 5. **Review** — run the `spec-reviewer` subagent on the file. Fix critical/high findings; record the
    rest under "ღია კითხვები".
-6. **Check** — `py -3.12 tools/context_graph.py check <file>`; fix every error.
+6. **Check** — `bash .claude/hooks/py.sh tools/context_graph.py check <file>`; fix every error.
 7. **Tell the owner** — 3–5 Georgian sentences: what the spec covers, what is out of scope, what they
    must decide; this summary is what they judge — never ask them to read the file. The approval is
    `/approve spec NNNN`. Planning (`/feature-plan`) starts only after it.

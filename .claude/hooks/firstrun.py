@@ -4,8 +4,10 @@
 and look at what is missing — so a person who has just installed the engine can start straight from their idea.
 
 SessionStart hook (startup, resume, clear). It runs `git init` when the folder is not a repository, sets
-core.hooksPath = .githooks in this repository only, and checks git itself, git's name and e-mail, Python 3.12 and
-gitleaks; a project inside another repository, or a core.hooksPath of the person's own, is reported and left alone.
+core.hooksPath = .githooks in this repository only, makes the commit hook executable on macOS and Linux (a copy
+without file modes loses that bit, and git then skips the hook), and checks git itself, git's name and e-mail,
+Python 3.12+ and gitleaks; a project inside another repository, or a core.hooksPath of the person's own, is
+reported and left alone. Install hints name Windows, macOS and Linux.
 Silent when everything is in place; otherwise one short Georgian note for the agent: what was done and what is
 missing. It never touches the global git config (L-005), never installs anything (installing a tool is the person's
 yes) and never fails the session — it always exits 0. Missing tools are reported once per repository (a marker
@@ -35,6 +37,14 @@ os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
 HERE = Path(__file__).resolve()
 sys.path.insert(0, str(HERE.parents[2] / "tools" / "gates"))
 MARKER = "engine-firstrun"  # inside .git/: the notes about missing tools that were already given
+INSTALL = {  # what to offer the person, per system; installing is always their yes. py.sh repeats "python": change both
+    "git": "Windows: `winget install Git.Git`; macOS: `xcode-select --install` ან `brew install git`; "
+           "Linux: `sudo apt install git`",
+    "python": "Windows: `winget install Python.Python.3.12`; macOS: `brew install python@3.12`; "
+              "Linux: `sudo apt install python3.12` (Ubuntu 24.04+), სხვაგან `uv python install 3.12`",
+    "gitleaks": "Windows: `winget install Gitleaks.Gitleaks`; macOS: `brew install gitleaks`; "
+                "Linux: `sudo apt install gitleaks` ან GitHub-ის release",
+}
 
 
 def project_root() -> Path:
@@ -70,7 +80,7 @@ def gitleaks_note() -> str | None:
                 "INCONCLUSIVE-ით ჩერდება; ჰკითხე ადამიანს, გაასწოროს ეს ცვლადი თუ წაშალოს")
     return ("gitleaks არ არის — საიდუმლოებს commit-ზე ძრავის საკუთარი სკანერი ამოწმებს (უფრო სუსტია: git-ის "
             "ისტორიას არ ამოწმებს); შესთავაზე ადამიანს gitleaks-ის დაყენება მისი „კი“-თ "
-            "(Windows: `winget install Gitleaks.Gitleaks`)")
+            f"({INSTALL['gitleaks']})")
 
 
 def setup(root: Path) -> tuple[list[str], list[str], list[str]]:
@@ -81,7 +91,7 @@ def setup(root: Path) -> tuple[list[str], list[str], list[str]]:
     gate_off: list[str] = []
     if shutil.which("git") is None:
         return done, ["git არ არის დაყენებული — შენახვის წერტილები (commit) და commit-ის შემოწმებები ვერ იმუშავებს; "
-                      "შესთავაზე ადამიანს დაყენება (Windows: `winget install Git.Git`) და დაელოდე მის „კი“-ს"], gate_off
+                      f"შესთავაზე ადამიანს დაყენება ({INSTALL['git']}) და დაელოდე მის „კი“-ს"], gate_off
     top = repo_top(root)
     if top is None:
         r = git(root, "init", "-q")
@@ -103,15 +113,33 @@ def setup(root: Path) -> tuple[list[str], list[str], list[str]]:
                         "შეიცვალოს თუ არა ამ რეპოში `.githooks`-ით")
     elif not hook.is_file():  # git skips a missing hook without a word
         gate_off.append("`.githooks/pre-commit` არ არის — commit-ის შემოწმებები არ მუშაობს")
+    if os.name != "nt" and hook.is_file() and not os.access(hook, os.X_OK):  # git on macOS/Linux skips it
+        why_not = ""
+        try:  # a link (even to a file in the project) or a file outside the project is not ours to change
+            ours = not hook.is_symlink() and hook.resolve().is_relative_to(root.resolve())
+        except (OSError, RuntimeError):
+            ours = False
+        if not ours:
+            why_not = "a link, or a file outside the project — left alone"
+        else:
+            try:
+                hook.chmod(hook.stat().st_mode | 0o100)  # the owner only: git runs the hook as the person who commits
+                done.append("`.githooks/pre-commit` გაშვებადი გახდა (`chmod +x`) — მის გარეშე git commit-ის "
+                            "შემოწმებას macOS-სა და Linux-ზე ჩუმად გამოტოვებდა")
+            except OSError as e:
+                why_not = e.strerror or type(e).__name__
+        if why_not:
+            gate_off.append(f"`.githooks/pre-commit` გაშვებადი არ არის და ვერ გახდა ({why_not}) — commit-ის "
+                            "შემოწმებები არ მუშაობს; ჰკითხე ადამიანს `chmod +x .githooks/pre-commit`")
     who = [key for key in ("user.name", "user.email") if not git(root, "config", "--get", key).stdout.strip()]
     if who:
         missing.append(f"git-ს არ აქვს {' და '.join(who)} — commit (შენახვის წერტილი) ვერ შეიქმნება; ჰკითხე ადამიანს "
                        "სახელი და ელფოსტა და მისი პასუხით ჩაწერე მხოლოდ ამ რეპოში (`git config --local user.name …`, "
                        "`git config --local user.email …`; საჯარო რეპოსთვის GitHub-ის დამალული მისამართი "
                        "`…@users.noreply.github.com` სჯობს)")
-    if sys.version_info < (3, 12):
-        missing.append(f"Python {sys.version_info.major}.{sys.version_info.minor} — ძრავას 3.12 სჭირდება; შესთავაზე "
-                       "ადამიანს დაყენება (Windows: `winget install Python.Python.3.12`)")
+    if sys.version_info < (3, 12):  # why 3.12: .claude/hooks/py.sh
+        missing.append(f"Python {sys.version_info.major}.{sys.version_info.minor} — ძრავას 3.12 ან უფრო ახალი სჭირდება; "
+                       f"შესთავაზე ადამიანს დაყენება ({INSTALL['python']})")
     note = gitleaks_note()
     if note:
         missing.append(note)
