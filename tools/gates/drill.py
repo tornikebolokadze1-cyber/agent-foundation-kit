@@ -2757,6 +2757,24 @@ def settings_path() -> Path:
     return Path(os.environ.get("DRILL_SETTINGS") or CODE / ".claude/settings.json")
 
 
+# The guard does not cut the Read tool, so these deny rules alone keep a secret file from the model; a live session
+# proved them (D-021, 2026-10-19: refused at the root and a folder down, read once the rule was gone). None of them
+# may drop out of the list unnoticed (D-066).
+SECRET_READ_DENY = (
+    "Read(.env)", "Read(.env.local)", "Read(.env.*.local)", "Read(.env.production)", "Read(.env.development)",
+    "Read(.env.staging)", "Read(.env.test)", "Read(.env.prod)", "Read(.env.dev)", "Read(.env.stage)", "Read(.env.bak)",
+    "Read(.env.backup)", "Read(.env.old)", "Read(.env.orig)", "Read(.env.save)", "Read(.env.secret)",
+    "Read(.env.secrets)", "Read(.envrc)", "Read(*.pem)", "Read(*.key)", "Read(*.p12)", "Read(*.pfx)", "Read(*.jks)",
+    "Read(id_rsa)", "Read(id_ed25519)", "Read(id_ecdsa)", "Read(**/.ssh/**)", "Read(**/.aws/**)", "Read(~/.ssh/**)",
+    "Read(~/.aws/**)", "Read(/secrets/**)", "Read(credentials*.json)", "Read(serviceAccountKey*.json)",
+    "Read(**/.env)", "Read(**/.env.local)", "Read(**/.env.production)", "Read(**/*.pem)", "Read(**/*.key)",
+    "Read(**/secrets/**)")
+
+
+def lost_secret_rules(deny: list[str]) -> list[str]:
+    return [rule for rule in SECRET_READ_DENY if rule not in deny]
+
+
 def g_wiring(tmp: Path, vault: Path) -> None:
     print("== wiring (.claude/settings.json → the scripts actually run) ==")
     sp = settings_path()
@@ -2806,6 +2824,13 @@ def g_wiring(tmp: Path, vault: Path) -> None:
     deny = " ".join(perms.get("deny", []))
     expect("Read(.env)" in deny and "--no-verify" in deny and "memory/approvals.md" in deny,
            "deny list keeps secrets, hook bypass and the ledger out of reach", deny[:160])
+    lost = lost_secret_rules(perms.get("deny", []))
+    expect(not lost, f"deny list keeps all {len(SECRET_READ_DENY)} secret-file Read rules a live session proved "
+           "(D-021)", "missing: " + ", ".join(lost))
+    for gone in ("Read(.env.prod)", "Read(id_rsa)"):
+        rest = [rule for rule in perms.get("deny", []) if rule != gone]
+        expect(lost_secret_rules(rest) == [gone], f"seeded: a deny list without {gone} is caught by name",
+               str(lost_secret_rules(rest)))
     expect("mcp__*" in perms.get("ask", []) and perms.get("disableBypassPermissionsMode") == "disable",
            "every MCP tool asks the owner first, and bypass-permissions mode is switched off", str(perms.get("ask", [])[-3:]))
     matchers = [m.get("matcher", "") for m in hooks.get("PostToolUse", [])
