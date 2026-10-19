@@ -1,4 +1,4 @@
-# ── Secrets: never committed (security.md §4). Real values live only in .env ──
+# ── Secrets: never committed (ADR-0007). Real values live only in .env ──
 .env
 .env.*
 !.env.example
@@ -51,5 +51,12 @@ build/
 Thumbs.db
 desktop.ini
 .DS_Store
+# macOS: metadata files on shared and external drives, the Spotlight index and the trash folder of a drive
+._*
+.AppleDouble
+.Spotlight-V100/
+.Trashes/
+# backup copies some editors leave next to a file (file.txt~)
+*~
 *.backup-*
 *.tmp

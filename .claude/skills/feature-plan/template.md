@@ -18,7 +18,7 @@ adrs: []
 ## 2. ამოცანები
 
 - [ ] T1 — <ტესტი / eval, რომელიც ჯერ ჩავარდება> (AC-001) — verify: `<ბრძანება>`
-- [ ] T2 — <კოდი> (REQ-001, AC-001) — verify: `py -3.12 tools/gates/gate.py`
+- [ ] T2 — <კოდი> (REQ-001, AC-001) — verify: `bash .claude/hooks/py.sh tools/gates/gate.py`
 
 ## 3. კარიბჭეები, ტესტები და evals
 
@@ -27,7 +27,7 @@ adrs: []
 
 ## 4. ორკესტრაცია
 
-კოდის ციკლი: Opus 5 → Sol, მაქს. 2 ბრუნი თითო ამოცანაზე — მხოლოდ თუ `orchestration/config.toml`-ში `enabled = true`.
+კოდის ციკლი ([[ADR-0005-maker-checker-orchestration]], I ეტაპი): კოდს Sonnet 5.5 წერს, Opus 5.5 ამოწმებს, მაქს. 2 ბრუნი თითო ამოცანაზე — მხოლოდ თუ `orchestration/config.toml`-ში `enabled = true`.
 
 ## 5. რისკები და უკან დაბრუნება
 

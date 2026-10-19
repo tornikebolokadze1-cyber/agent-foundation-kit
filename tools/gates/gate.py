@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 """Deterministic gate runner. The gates themselves are listed in tools/gates/gates.toml.
 
-  py -3.12 tools/gates/gate.py                  every enabled gate, whole project
-  py -3.12 tools/gates/gate.py --pre-commit     gates marked pre_commit (secrets: staged files only)
-  py -3.12 tools/gates/gate.py --files F [F…]   gates marked stop, restricted to these files
-  py -3.12 tools/gates/gate.py --only graph,json
-  py -3.12 tools/gates/gate.py --list
+  bash .claude/hooks/py.sh tools/gates/gate.py                  every enabled gate, whole project
+  bash .claude/hooks/py.sh tools/gates/gate.py --pre-commit     gates marked pre_commit (secrets: staged files only)
+  bash .claude/hooks/py.sh tools/gates/gate.py --files F [F…]   gates marked stop, restricted to these files
+  bash .claude/hooks/py.sh tools/gates/gate.py --only graph,json
+  bash .claude/hooks/py.sh tools/gates/gate.py --list
 
 Exit 0 = every enabled gate passed · 1 = at least one FAILED · 2 = INCONCLUSIVE (a gate
 could not run, or checked zero files). SKIP (switched off) is reported and is not a pass.
@@ -116,12 +116,31 @@ def gate_graph(root: Path, files: list[Path] | None, **_) -> Result:
     return Result("graph", "FAIL" if errors else "PASS", s, [i.fmt() for i in errors + warns][:40])
 
 
+# JSON with comments and trailing commas (JSONC): the TypeScript and VS Code settings files a scaffold writes
+# (`npm create vite`, `npm create astro`) are read that way by their own tools, so a comment there is no error (review M8).
+JSONC_NAMES = re.compile(r"^(?:tsconfig|jsconfig)(?:\.[\w.-]+)?\.json$|^(?:devcontainer|\.devcontainer)\.json$")
+JSONC_COMMENT_RE = re.compile(r'"(?:[^"\\]|\\.)*"|//[^\n]*|/\*.*?\*/', re.S)
+JSONC_COMMA_RE = re.compile(r'"(?:[^"\\]|\\.)*"|,(?=\s*[\]}])')
+
+
+def jsonc_text(text: str) -> str:
+    """JSONC as plain JSON: comments out, then trailing commas out; a string is never touched."""
+    def keep_strings(m: re.Match[str]) -> str:
+        return m.group(0) if m.group(0).startswith('"') else ""
+    return JSONC_COMMA_RE.sub(keep_strings, JSONC_COMMENT_RE.sub(keep_strings, text))
+
+
 def gate_json(root: Path, files: list[Path], **_) -> Result:
-    todo = [p for p in pick(files, {".json"}) if owned(root, p)]
+    # The product's own code folder (CODE_MARKERS — package.json, pyproject.toml) is checked by its own lint and tests,
+    # as the context graph leaves it to them too.
+    product = cg.code_folders(root)
+    todo = [p for p in pick(files, {".json"}) if owned(root, p) and not rel(root, p).startswith(product)]
     bad = []
     for p in todo:
         try:
-            json.loads(p.read_text(encoding="utf-8"))
+            text = p.read_text(encoding="utf-8")
+            jsonc = JSONC_NAMES.match(p.name) or p.parent.name in (".vscode", ".devcontainer")
+            json.loads(jsonc_text(text) if jsonc else text)
         except (ValueError, OSError) as e:
             bad.append(f"{rel(root, p)}: {e}")
     return Result("json", "FAIL" if bad else "PASS", f"{len(todo)} .json file(s) parsed", bad)
@@ -149,9 +168,15 @@ def gate_python(root: Path, files: list[Path], **_) -> Result:
     return Result("python", "FAIL" if bad else "PASS", f"{len(todo)} .py file(s) compiled", bad)
 
 
+def _is_wsl_bash(p: str) -> bool:
+    """Windows' System32/WindowsApps bash.exe is the WSL launcher, not Git Bash — it rejects Windows paths and drops env vars."""
+    return os.name == "nt" and p.replace("\\", "/").lower().endswith(
+        ("/system32/bash.exe", "/system32/bash.bat", "/sysnative/bash.exe", "/windowsapps/bash.exe"))
+
+
 def find_bash() -> str | None:
     for cand in (os.environ.get("GATE_BASH"), shutil.which("bash"), r"C:\Program Files\Git\bin\bash.exe"):
-        if cand and Path(cand).exists():
+        if cand and not _is_wsl_bash(cand) and Path(cand).exists():
             return cand
     return None
 
@@ -168,7 +193,29 @@ def gate_shell(root: Path, files: list[Path], **_) -> Result:
         r = subprocess.run([bash, "-n", str(p)], capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode != 0:
             bad.append(f"{rel(root, p)}: {r.stderr.strip()[:200]}")
-    return Result("shell", "FAIL" if bad else "PASS", f"{len(todo)} script(s) checked with {Path(bash).name} -n", bad)
+    # git runs a hook only when it is executable. Windows cannot tell, so the mode git stores is what a macOS or Linux
+    # clone gets: a hook stored as 100644 is skipped there, with no more than a hint in git's output.
+    hooks = [rel(root, p) for p in todo if p.parent.name == ".githooks"]
+    stored = []  # (mode, name) for each hook git has in its index; an untracked one has no stored mode yet
+    if hooks:
+        try:
+            r = subprocess.run(["git", "-C", str(root), "ls-files", "-s", "--", *hooks], capture_output=True,
+                               text=True, encoding="utf-8", errors="replace", timeout=30)
+            why = "" if r.returncode == 0 else (r.stderr.strip() or f"exit {r.returncode}")[:160]
+        except (OSError, subprocess.SubprocessError) as e:
+            r, why = None, str(e)[:160]
+        if why:
+            return Result("shell", "FAIL" if bad else "INCONCLUSIVE", f"{len(todo)} script(s) checked with "
+                          f"{Path(bash).name} -n; git could not list the hooks ({why}) — the executable mode of "
+                          f"{len(hooks)} hook(s) NOT checked", bad)
+        stored = [(meta.split()[0], name) for meta, _, name in (ln.partition("\t") for ln in r.stdout.splitlines())]
+    for mode, name in stored:
+        if mode != "100755":
+            bad.append(f"{name}: stored in git as {mode}, not 100755 — on macOS and Linux git would skip this hook; "
+                       f"`git update-index --chmod=+x {name}`")
+    return Result("shell", "FAIL" if bad else "PASS", f"{len(todo)} script(s) checked with {Path(bash).name} -n; "
+                  f"{len(stored)} of {len(hooks)} hook(s) checked for the executable mode git stores"
+                  + (f" ({len(hooks) - len(stored)} not in git yet: no stored mode)" if len(stored) < len(hooks) else ""), bad)
 
 
 def gate_eol(root: Path, files: list[Path], **_) -> Result:
@@ -362,7 +409,9 @@ def gate_instructions(root: Path, files: list[Path], **_) -> Result:
 TASK_LINE_RE = re.compile(r"^\s*[-*] \[([ xX])\] (.*)$")
 TASK_ID_RE = re.compile(r"^(D-\d{3,}) — \S")
 TASK_DONE_RE = re.compile(r"✓ (\d{4}-\d{2}-\d{2})(?: · (.+))?$")
-SHA_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-f]{7,40}(?![0-9a-fA-F])")
+# A commit is a word of its own with a digit in it: not the session part of an episode's name (EP-…-515c117b.md), a
+# piece of a path or a link, or an English word made of the letters a–f, such as `defaced` (review M6).
+SHA_RE = re.compile(r"(?<![\w./:#-])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}(?![\w/:#-]|\.\w)")
 
 
 def commit_exists(root: Path, sha: str) -> bool | None:
@@ -412,7 +461,7 @@ def gate_tasks(root: Path, files: list[Path], **_) -> Result:
 
 
 HARNESS_PREFIXES = (".claude/hooks/", ".claude/settings", ".githooks/", "tools/", "orchestration/run.py",
-                    "orchestration/config.toml", "orchestration/prompts/")
+                    "orchestration/decide.py", "orchestration/config.toml", "orchestration/prompts/")
 
 
 def gate_drill(root: Path, files: list[Path], pre_commit: bool = False, **_) -> Result:
@@ -428,7 +477,8 @@ def gate_drill(root: Path, files: list[Path], pre_commit: bool = False, **_) -> 
     tail = [ln for ln in r.stdout.splitlines() if ln.startswith(("  DEAD", "  DEFECT", "  INCONCL"))]
     last = (r.stdout.strip().splitlines() or ["(no output)"])[-1]
     status = {0: "PASS", 1: "FAIL"}.get(r.returncode, "INCONCLUSIVE")
-    return Result("drill", status, last, tail + ([r.stderr.strip()[-300:]] if r.returncode not in (0, 1) else []))
+    return Result("drill", status, last, tail + ([r.stderr.strip()[-300:]] if r.returncode not in (0, 1) else []),
+                  notice="LEFT OUT" in last)
 
 
 BUILTINS = {"graph": gate_graph, "json": gate_json, "toml": gate_toml, "python": gate_python,
@@ -436,9 +486,20 @@ BUILTINS = {"graph": gate_graph, "json": gate_json, "toml": gate_toml, "python":
             "tasks": gate_tasks, "drill": gate_drill}
 
 
+def venv_python(root: Path) -> Path:
+    """The project's own virtual environment's Python: .venv/Scripts/python.exe on Windows, .venv/bin/python on
+    macOS and Linux — a guide writes `{venv_python}` once for every system (docs/guides/agent.md)."""
+    return root / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
 def run_cmd_gate(root: Path, g: dict) -> Result:
-    """A `cmd` gate: an argument list run without a shell, so nothing in it is ever re-parsed."""
+    """A `cmd` gate: an argument list run without a shell, so nothing in it is ever re-parsed. `{venv_python}` is the
+    project's virtual environment's Python, `{python}` the engine's own — the one running this file."""
     argv = g["cmd"] if isinstance(g["cmd"], list) else shlex.split(g["cmd"])
+    if any("{venv_python}" in a for a in argv) and not venv_python(root).is_file():
+        return Result(g["id"], "INCONCLUSIVE", f"`{{venv_python}}` is {venv_python(root).relative_to(root).as_posix()}, "
+                      "which does not exist — create the environment first: `bash .claude/hooks/py.sh -m venv .venv`")
+    argv = [a.replace("{venv_python}", str(venv_python(root))).replace("{python}", sys.executable) for a in argv]
     exe = shutil.which(argv[0]) if argv else None
     shown = " ".join(argv)
     if not exe:

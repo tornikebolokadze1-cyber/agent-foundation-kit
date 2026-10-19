@@ -8,9 +8,10 @@ model: haiku
 You verify claims; you never fix, edit or commit. Evidence beats reasoning: a claim without evidence is
 INCONCLUSIVE, never a pass.
 
-1. Run `py -3.12 tools/gates/gate.py` and report its exact final line and exit code, plus every FAIL /
-   INCONCLUSIVE line. If asked, also run `py -3.12 tools/gates/drill.py` the same way. SKIP lines are
-   "not checked" — list them, do not count them as passed.
+1. Run `bash .claude/hooks/py.sh tools/gates/gate.py` (the engine's Python launcher, the same on Windows,
+   macOS and Linux) and report its exact final line and exit code, plus every FAIL / INCONCLUSIVE line. If
+   asked, also run `bash .claude/hooks/py.sh tools/gates/drill.py` the same way. SKIP lines are "not
+   checked" — list them, do not count them as passed.
 2. For each claim or acceptance criterion you were given: find the evidence (a test that asserts it, a
    gate result, a file, command output). Mark it `corroborated` (cite the evidence), `refuted` (cite what
    contradicts it) or `inconclusive` (say what evidence is missing).

@@ -7,13 +7,13 @@ plus links ([[wikilinks]] and relative [text](path.md) links). Obsidian draws th
 same links as its graph view for the owner; this script builds the same graph for
 the agent, and checks it mechanically.
 
-  py -3.12 tools/context_graph.py build                write memory/graph/graph.json + CONTEXT-MAP.md
-  py -3.12 tools/context_graph.py check [FILE ...]     integrity check; with FILEs, report only
-                                                       issues that involve those files
-  py -3.12 tools/context_graph.py query ID [--depth N] one node's neighbourhood (ID or file stem)
-  py -3.12 tools/context_graph.py pending              documents waiting for the owner's /approve
-  py -3.12 tools/context_graph.py stage                where the project stands (F1–F5) and what comes next
-  py -3.12 tools/context_graph.py brief                SessionStart hook: rebuild + stage + short brief
+  bash .claude/hooks/py.sh tools/context_graph.py build                write memory/graph/graph.json + CONTEXT-MAP.md
+  bash .claude/hooks/py.sh tools/context_graph.py check [FILE ...]     integrity check; with FILEs, report only
+                                                                       issues that involve those files
+  bash .claude/hooks/py.sh tools/context_graph.py query ID [--depth N] one node's neighbourhood (ID or file stem)
+  bash .claude/hooks/py.sh tools/context_graph.py pending              documents waiting for the owner's /approve
+  bash .claude/hooks/py.sh tools/context_graph.py stage                where the project stands (F1–F5) and what comes next
+  bash .claude/hooks/py.sh tools/context_graph.py brief                SessionStart hook: rebuild + stage + short brief
 
 Exit codes (check): 0 = no errors, 1 = errors found, 2 = inconclusive (nothing
 was scanned, or the root is wrong) — a check that saw nothing must not pass.
@@ -139,7 +139,7 @@ class Link:
     line: int            # 1-based line in the file
     kind: str            # "link" or a frontmatter relation name
     resolved: str | None = None   # node key (vault-relative posix path) or None
-    problem: str | None = None    # "broken" | "ambiguous" | "unquoted"
+    problem: str | None = None    # "broken" | "ambiguous" | "outside" (leaves the project, review M2)
 
 
 @dataclass
@@ -198,7 +198,7 @@ class Graph:
     root: Path
     nodes: dict[str, Node]
     by_stem: dict[str, list[str]]
-    ledger: dict[str, list[str]]
+    ledger: dict[str, list[str]]  # id -> the statuses the owner ledger records for that document as it is now
 
     def edges(self) -> list[tuple[str, str, str]]:
         out = []
@@ -323,7 +323,7 @@ def parse_frontmatter(text: str) -> tuple[dict | None, int, str | None]:
 
 
 def _quote(value) -> str:
-    s = str(value)
+    s = re.sub(r"[\r\n]+", " ", str(value)).strip()  # a frontmatter value is one physical line (review S15)
     if s == "" or re.search(r"[:#\[\]{}\"',]|^\s|\s$", s):
         return '"' + s.replace('"', '\\"') + '"'
     return s
@@ -344,12 +344,22 @@ def set_field(text: str, key: str, value) -> str:
     return "\n".join(lines)
 
 
+STATUS_LINE_RE = re.compile(r"^status:[ \t]*['\"]?([^\s'\"#]+)")
+
+
 def status_of(text: str | None) -> str | None:
-    """The frontmatter status of a document's text, or None (no text, no frontmatter, empty status)."""
+    """The frontmatter status of a document's text, or None (no text, no frontmatter, empty status). A line the reader
+    cannot parse stops it, so then the `status:` line is looked for on its own: a broken line above `status: accepted`
+    must not hide an approval from the guard (review M3)."""
     if text is None:
         return None
-    fm, _, _ = parse_frontmatter(text)
+    fm, _, err = parse_frontmatter(text)
     v = (fm or {}).get("status")
+    if v in (None, "") and err:
+        lines, _ = split_frontmatter(text)
+        if lines is None:  # opened with --- and never closed: any line may still be frontmatter
+            lines = text.lstrip("﻿").split("\n")[1:]
+        v = next((m.group(1) for m in map(STATUS_LINE_RE.match, lines) if m), None)
     return None if v in (None, "") else str(v)
 
 
@@ -468,7 +478,9 @@ def load(root: Path | None = None) -> Graph:
     for key, n in nodes.items():
         # Markdown is linked by stem ([[intent]]); other files by full name ([[x.html]]).
         by_stem.setdefault(n.stem.lower(), []).append(key)
-    g = Graph(root=root, nodes=nodes, by_stem=by_stem, ledger=_read_ledger(root))
+    rows = _read_ledger(root)
+    ledger = {n.id: _ledger_statuses(rows[n.id], n) for n in nodes.values() if n.fm and not n.foreign and n.id in rows}
+    g = Graph(root=root, nodes=nodes, by_stem=by_stem, ledger=ledger)
     for n in nodes.values():
         for ln in n.links:
             _resolve(g, n, ln)
@@ -482,16 +494,25 @@ def _resolve(g: Graph, node: Node, ln: Link) -> None:
         if not tgt:
             ln.resolved = node.path
             return
+        # A link names a file inside the project (review M2). An absolute or network target (`/Windows/System32`,
+        # `//host/share`) is never looked up — on Windows the first is the system folder, the second asks the network
+        # on every check — and `..` climbs out of the project, as does a folder link (symlink, junction) inside it.
+        if tgt.startswith(("/", "\\")):
+            ln.problem = "outside"
+            return
         base = Path(node.path).parent
         cand = (base / tgt).as_posix()
         norm = os.path.normpath(cand).replace("\\", "/")
         if norm.startswith("../"):
-            ln.problem = "broken"
+            ln.problem = "outside"
             return
         if norm in g.nodes:
             ln.resolved = norm
         elif (g.root / norm).exists():
-            ln.resolved = norm  # an existing folder or non-indexed file: valid, not a node
+            if (g.root / norm).resolve().is_relative_to(g.root):
+                ln.resolved = norm  # an existing folder or non-indexed file: valid, not a node
+            else:
+                ln.problem = "outside"
         else:
             ln.problem = "broken"
         return
@@ -525,9 +546,9 @@ def _resolve(g: Graph, node: Node, ln: Link) -> None:
         ln.problem = "broken"
 
 
-def _read_ledger(root: Path) -> dict[str, list[str]]:
-    """id -> list of statuses the ledger records it moving TO, in order."""
-    out: dict[str, list[str]] = {}
+def _read_ledger(root: Path) -> dict[str, list[tuple[str, str, str]]]:
+    """id -> (the status it moved TO, the row's day YYYY-MM-DD or "", the file it names) for each row, in order."""
+    out: dict[str, list[tuple[str, str, str]]] = {}
     p = root / LEDGER_PATH
     try:
         text = p.read_text(encoding="utf-8", errors="replace")
@@ -539,8 +560,20 @@ def _read_ledger(root: Path) -> dict[str, list[str]]:
             continue
         ident = cells[1].strip("` ")
         to = cells[2].split("→", 1)[1].strip().split()[0] if cells[2].split("→", 1)[1].strip() else ""
-        out.setdefault(ident, []).append(to)
+        day = cells[0][:10] if re.match(r"\d{4}-\d{2}-\d{2}", cells[0]) else ""
+        out.setdefault(ident, []).append((to, day, cells[3].strip("` ") if len(cells) > 3 else ""))
     return out
+
+
+def _ledger_statuses(rows: list[tuple[str, str, str]], n: Node) -> list[str]:
+    """The statuses the ledger records for document n as it is now (review M4). A row counts only for the file it
+    names. Where an approved document cannot change without being reopened (intent, spec, ADR), a row must also be as
+    new as the document's `updated` day, so an approval does not outlive a reopen and a rewrite; a plan's `updated`
+    moves with its ticks after approval, so for a plan only the file counts. Known gap: a reopen and a rewrite on the
+    approval day itself, or one that leaves `updated` as it was."""
+    updated = "" if n.type == "plan" else str((n.fm or {}).get("updated") or "")[:10]
+    updated = updated if re.fullmatch(r"\d{4}-\d{2}-\d{2}", updated) else ""
+    return [to for to, day, path in rows if path == n.path and not (updated and day and day < updated)]
 
 
 # ── Checks ───────────────────────────────────────────────────────────────────
@@ -607,6 +640,9 @@ def check(g: Graph) -> list[Issue]:
             elif ln.problem == "ambiguous":
                 issues.append(Issue("error", "LINK-AMBIGUOUS", n.path, ln.line,
                                     f"[[{ln.target}]] matches several files — use a path link such as [[folder/{ln.target}]]"))
+            elif ln.problem == "outside":
+                issues.append(Issue("error", "LINK-OUTSIDE", n.path, ln.line,
+                                    f"{ln.target[3:]} points outside the project — link a file inside it, by a relative path"))
 
     issues += _check_relations(g)
     issues += _check_chain_and_ledger(g)
@@ -785,7 +821,7 @@ class Stage:
         where = f" (`{self.doc}`)" if self.doc else ""
         path = " → ".join(f"{k} {v}" for k, v in STAGES.items())
         return printable("\n".join([
-            "## ეტაპი — სად დგას პროექტი (`py -3.12 tools/context_graph.py stage`, ADR-0011)",
+            "## ეტაპი — სად დგას პროექტი (`bash .claude/hooks/py.sh tools/context_graph.py stage`, ADR-0011)",
             f"- **{self.label}** — {self.step}{where}",
             f"- ადამიანს: {self.person}",
             f"- აგენტს: {self.agent}",
@@ -1008,16 +1044,16 @@ def brief(g: Graph, issues: list[Issue]) -> str:
     ]
     lines += [f"  - {i.fmt()}" for i in errors[:5]]
     if len(errors) > 5:
-        lines.append(f"  - … კიდევ {len(errors) - 5} (`py -3.12 tools/context_graph.py check`)")
+        lines.append(f"  - … კიდევ {len(errors) - 5} (`bash .claude/hooks/py.sh tools/context_graph.py check`)")
     if pend:
         lines.append("- მფლობელის დასამტკიცებელი (შეახსენე; თავად ვერ დაამტკიცებ):")
         lines += [f"  - {n.id} — {n.title} (`{n.status}`) → `{approve_hint(n)}`" for n in pend[:10]]
     if eng:
         lines.append(f"- ძრავის საკუთარი ADR-ები (`scope: engine`): {len(eng)} `proposed` — პროექტის ეტაპებს არ აჩერებს; "
                      "ისინი ძრავის ავტორის გადასაწყვეტია და ახალი პროექტის მფლობელს დასამტკიცებლად არ ეძლევა "
-                     "(`py -3.12 tools/context_graph.py pending`)")
+                     "(`bash .claude/hooks/py.sh tools/context_graph.py pending`)")
     lines.append("- ორიენტაცია: `memory/graph/CONTEXT-MAP.md`; ერთი კვანძის სამეზობლო: "
-                 "`py -3.12 tools/context_graph.py query <id>`")
+                 "`bash .claude/hooks/py.sh tools/context_graph.py query <id>`")
     return printable("\n".join(lines))
 
 
