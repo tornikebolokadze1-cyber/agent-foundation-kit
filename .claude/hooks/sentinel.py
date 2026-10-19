@@ -57,11 +57,16 @@ FOREIGN_IN_CMD_RE = re.compile(r"(?:^|[\s'\"=;&|(\\/])" + FOREIGN + r"(?:[\\/\s'
 FOREIGN_LINE_RE = re.compile(r"(?m)^(?:\./)?" + FOREIGN + r"[\\/]")
 
 
-def root_dir() -> Path:
+def given_root() -> str | None:
     for cand in (os.environ.get("SENTINEL_ROOT"), os.environ.get("CLAUDE_PROJECT_DIR")):
         if cand:
-            return Path(cand).resolve()
-    return CODE_ROOT
+            return cand
+    return None
+
+
+def root_dir() -> Path:
+    given = given_root()
+    return Path(given).resolve() if given else CODE_ROOT
 
 
 def source_of(tool: str, ti: dict) -> str:
@@ -74,9 +79,15 @@ def source_of(tool: str, ti: dict) -> str:
     return tool
 
 
-def names_foreign(text: str, root: Path) -> bool:
-    """Search output with a line from a research/ file — paths shown relative or absolute."""
-    for prefix in {str(root) + os.sep, root.as_posix() + "/"}:
+def names_foreign(text: str, root: Path, *also: Path) -> bool:
+    """Search output with a line from a research/ file — paths shown relative or absolute. One folder has several
+    spellings (a junction or symlink, an 8.3 short name, macOS's /var for /private/var): the root is cut off as resolved,
+    as the environment gave it and as the tool was called with — the longest spelling first, so a shorter one never
+    cuts into a longer."""
+    given = given_root()
+    bases = {root, *also, *([Path(os.path.abspath(given))] if given else [])}
+    prefixes = {p for b in bases for p in (str(b) + os.sep, b.as_posix() + "/")}
+    for prefix in sorted(prefixes, key=len, reverse=True):
         text = text.replace(prefix, "")
     return bool(FOREIGN_LINE_RE.search(text))
 
@@ -101,7 +112,7 @@ def is_untrusted(tool: str, ti: dict, payload: dict, root: Path, text: str) -> b
         return True  # outside the project: a cloned repository, a download, another tool's folder
     if rel == FOREIGN or rel.startswith(FOREIGN + "/"):
         return True
-    return tool == "Grep" and rel == "." and names_foreign(text, root)
+    return tool == "Grep" and rel == "." and names_foreign(text, root, p)
 
 
 def cmd_post(payload: dict) -> int:

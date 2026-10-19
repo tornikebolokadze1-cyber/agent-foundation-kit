@@ -2505,6 +2505,37 @@ def g_sentinel(tmp: Path, vault: Path) -> None:
                              {"pattern": "x", "path": str(v)}, found_in["absolute"])):
         rc, out, _ = sentinel(v, "post", {"tool_name": "Grep", "tool_input": ti, "tool_response": resp})
         expect("SENTINEL[I1]" in out, f"seeded: injection in {label} → SENTINEL[I1]", out[:120])
+    # The project folder under another name — as a CI runner's short 8.3 TEMP path or macOS's /var → /private/var reach
+    # it: the sentinel resolves its root, the tool's output keeps the name it was called with (red in CI, 2026-10-19).
+    alias = tmp / "sentinel-alias"
+    try:  # a junction on Windows, a symlink elsewhere
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(v), str(alias))
+        else:
+            os.symlink(v, alias, target_is_directory=True)
+    except OSError as e:
+        record("INCONCL", f"sentinel: no folder link could be made here ({e}) — a project reached by another name is "
+                          "not drilled")
+    else:
+        for name, kind, label in (("research/notes.md", "seeded", "names research/ → SENTINEL[I1]"),
+                                  ("docs/adr/ADR-0001-demo.md", "control", "names only the project's own files → no note")):
+            resp = {"mode": "content", "content": f"{alias / name}:3:{said}"}
+            rc, out, _ = sentinel(alias, "post", {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": str(alias)},
+                                                  "tool_response": resp})
+            ok = ("SENTINEL[I1]" in out) if kind == "seeded" else (out.strip() == "")
+            expect(ok, f"{kind}: a Grep of the project reached by another name (a folder link) whose output {label}",
+                   out[:120], kind=kind)
+    if os.name != "nt":  # one spelling inside another, as /var inside macOS's /private/var: the longer is cut off first
+        short = tmp / "sentinel-short"
+        real = Path(str(tmp / "sentinel-nest") + str(short))
+        real.mkdir(parents=True, exist_ok=True)
+        os.symlink(real, short, target_is_directory=True)
+        resp = {"mode": "content", "content": f"{real.resolve() / 'research' / 'notes.md'}:3:{said}"}
+        rc, out, _ = sentinel(short, "post", {"tool_name": "Grep", "tool_input": {"pattern": "x", "path": str(short)},
+                                              "tool_response": resp})
+        expect("SENTINEL[I1]" in out, "seeded: the folder's resolved name holds its shorter name inside it (as /private/var "
+               "holds /var) and the Grep output uses the resolved one → still SENTINEL[I1]", out[:120])
     rc, out, _ = sentinel(v, "post", {"tool_name": "Grep", "tool_input": {"pattern": "x"}, "tool_response": found_in["project"]})
     expect(out.strip() == "", "control: a project-wide Grep whose lines come from the project's own files → no note", out[:120],
            kind="control")
