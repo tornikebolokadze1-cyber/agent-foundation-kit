@@ -83,7 +83,9 @@ high-quality review, not a lazy one.
 id | severity | location (file:line) | the input that breaks it → the wrong result | one-line fix
 ```
 
-`id` is your own label, `C1`, `C2`, … in the order you emit them.
+`id` is your own label, `C1`, `C2`, … in the order you emit them. The fourth column opens with a quote of the cited
+line in backticks (12+ characters): `tools/check_findings.py` checks that the file and line exist and that the quote is
+written there — a row whose place or quote does not check out does not count.
 
 Then exactly one closing line:
 

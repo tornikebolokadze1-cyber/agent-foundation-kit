@@ -105,6 +105,16 @@ stop = false  # whole-project scan of tasks/*.md: belongs at commit, not the per
 what = "tasks/*.md: every task has a unique D-NNN id; a ticked task carries a dated receipt, and a commit it cites exists"
 
 [[gate]]
+id = "budget"
+level = 0
+enabled = true
+builtin = "budget"
+max_bytes = 33716
+pre_commit = true
+stop = false  # one number for the whole project: belongs at commit; the guard (G7) holds it at every edit
+what = "the text every session loads (CLAUDE.md and its imports, unscoped rules, skill and agent listings) stays within max_bytes; only the owner raises it (`/approve budget N`)"
+
+[[gate]]
 id = "drill"
 level = 0
 enabled = true

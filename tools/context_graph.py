@@ -647,6 +647,7 @@ def check(g: Graph) -> list[Issue]:
     issues += _check_relations(g)
     issues += _check_chain_and_ledger(g)
     issues += _check_orphans(g)
+    issues += _check_specs(g)
     return issues
 
 
@@ -734,6 +735,114 @@ def _check_orphans(g: Graph) -> list[Issue]:
     for n in g.nodes.values():
         if not n.foreign and n.type in ("spec", "plan", "adr", "domain") and not inbound.get(n.path):
             out.append(Issue("warning", "ORPHAN", n.path, 1, "nothing links here — link it from its index or a related document"))
+    return out
+
+
+# ── A spec the owner is asked to approve ─────────────────────────────
+# From `review` on, the spec is what the owner judges: a line left from the template, an empty cell in the requirements
+# or criteria table, or more than three open questions fails here (and approve.py refuses a document with errors).
+# A draft is still being written; a superseded spec is history and is not reopened for this.
+SPEC_TEMPLATE = ".claude/skills/spec/template.md"
+SPEC_CHECKED = ("review", "approved")
+SPEC_MAX_QUESTIONS = 3
+SPEC_TOKEN_RE = re.compile(r"\bN{3,4}\b|YYYY-MM-DD|<[" + chr(0x10D0) + "-" + chr(0x10FF) + r"][^<>\n]*[^\s<>]>")  # <ქართული>
+SPEC_DOTS_RE = re.compile(r"(?:^|\|)\s*(?:…|\.\.\.)\s*(?=\||$)"                                    # a cell that is only …
+                          r"|^(?:[-*+]|\d+[.)])\s+(?:\*\*[^*\n]+\*\*\s*)?(?:…|\.\.\.)(?=\s|$)"     # a bullet that opens with …
+                          r"|\b(?:Given|When|Then)\s+…")
+SPEC_ROW_RE = re.compile(r"^\|\s*\**((?:REQ|AC)-\d+)\**\s*\|")
+SPEC_EMPTY_RE = re.compile(r"^(?:[\s\-–—.?]*|todo|tbd|tktk)$", re.I)
+SPEC_QUESTIONS_RE = re.compile(r"^#{1,2}\s+(?:\d+\.\s*)?ღია კითხვები")
+SPEC_ITEM_RE = re.compile(r"^ {0,3}(?:[-*+]|\d+[.)])\s+(.*)$")
+
+
+def _cells(line: str) -> list[str]:
+    return [c.strip() for c in line.strip().strip("|").split("|")]
+
+
+def _is_table_sep(line: str) -> bool:
+    s = line.strip()
+    return s.startswith("|") and "---" in s and not s.strip("|-: \t")
+
+
+def _norm(line: str) -> str:
+    s = line.strip()
+    return "|".join(_cells(s)) if s.startswith("|") else " ".join(s.split())
+
+
+def _prose_lines(text: str, start: int):
+    """(1-based number, line) for every line from `start` on that is outside a fenced code block."""
+    lines, fence = text.split("\n"), ""
+    for idx in range(start - 1, len(lines)):
+        mark = lines[idx].lstrip()[:3]
+        if mark in ("```", "~~~"):
+            fence = "" if fence == mark else (fence or mark)
+            continue
+        if not fence:
+            yield idx + 1, lines[idx]
+
+
+def _template_lines(root: Path) -> set[str] | None:
+    """The spec template's own text lines — not its headings, table heads or rules; a spec still holding one is unfinished."""
+    try:
+        text = (root / SPEC_TEMPLATE).read_text(encoding="utf-8").replace("\r\n", "\n")
+    except OSError:
+        return None
+    rows = list(_prose_lines(text, split_frontmatter(text)[1]))
+    return {_norm(line) for i, (_, line) in enumerate(rows) if line.strip() and not line.strip().startswith("#")
+            and not _is_table_sep(line) and not (i + 1 < len(rows) and _is_table_sep(rows[i + 1][1]))}
+
+
+def _check_specs(g: Graph) -> list[Issue]:
+    specs = [n for n in g.nodes.values() if not n.foreign and n.type == "spec" and n.status in SPEC_CHECKED]
+    template = _template_lines(g.root) if specs else set()
+    out: list[Issue] = []
+    for n in specs:
+        if template is None:  # half of the check cannot run, and that is not a pass (review Q6) — filed under the spec,
+            # so /approve and the Stop-gate, which keep the issues of the files they touch, see it too (review round 2)
+            out.append(Issue("error", "SPEC-NO-TEMPLATE", n.path, 1, f"the spec template ({SPEC_TEMPLATE}) is missing, "
+                             "so a line left from it cannot be recognised here — restore it (`git checkout -- "
+                             f"{SPEC_TEMPLATE}`); only the placeholder marks (NNNN, YYYY-MM-DD, <…>, …) were checked",
+                             (SPEC_TEMPLATE,)))
+        try:
+            text = (g.root / n.path).read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+        except OSError as e:
+            out.append(Issue("error", "SPEC-UNREAD", n.path, 1, f"could not be read for the spec check: {e}"))
+            continue
+        fix = (" — it is approved: reopen it (an edit that only sets status: draft), fix it, and the owner approves it "
+               "again" if n.status == "approved" else "")
+        start = split_frontmatter(text)[1]
+        header: list[str] = []
+        prev, questions, q_line, in_q = "", 0, 0, False
+        for no, line in _prose_lines(text, 1):
+            s, body = line.strip(), no >= start
+            bare = INLINE_CODE_RE.sub("", s)
+            if body and re.match(r"^#{1,2}\s", s):
+                in_q = bool(SPEC_QUESTIONS_RE.match(s))
+                q_line = no if in_q else q_line
+            elif in_q and (m := SPEC_ITEM_RE.match(line)) and not m.group(1).startswith("~~") \
+                    and m.group(1).strip() not in ("…", "..."):
+                questions += 1
+            why = ("placeholder" if SPEC_TOKEN_RE.search(bare) or (body and SPEC_DOTS_RE.search(bare))
+                   else "text" if body and s and _norm(s) in (template or set()) else "")
+            row = SPEC_ROW_RE.match(s) if body and not why else None
+            cells = _cells(s) if row else []
+            if row and header:  # Markdown shows a short row's missing cells empty and drops cells past the header
+                cells = (cells + [""] * len(header))[:len(header)]
+            empty = [i for i, c in enumerate(cells) if SPEC_EMPTY_RE.match(c)]
+            if why:
+                out.append(Issue("error", "SPEC-TEMPLATE", n.path, no, f"still the template's {why}: {printable(s[:60])!r} "
+                                 f"— at `{n.status}` every line is the spec's own{fix}"))
+            elif empty:
+                col = header[empty[0]] if empty[0] < len(header) else f"column {empty[0] + 1}"
+                out.append(Issue("error", "SPEC-EMPTY", n.path, no, f"{row.group(1)}: the `{col}` cell is empty — at "
+                                 f"`{n.status}` every cell of the requirements and criteria tables is filled{fix}"))
+            if _is_table_sep(s):
+                header = _cells(prev)
+            prev = s
+        if questions > SPEC_MAX_QUESTIONS:
+            out.append(Issue("error", "SPEC-QUESTIONS", n.path, q_line, f"{questions} open questions — at `{n.status}` "
+                             f"a spec keeps at most {SPEC_MAX_QUESTIONS}: ask the rest in the chat, one per message, and "
+                             f"write the answers into the spec{fix}"))
     return out
 
 
@@ -886,7 +995,8 @@ def project_stage(g: Graph) -> Stage:
                      person="უპასუხე კითხვებს; როცა intent.md შენს აზრს სწორად ასახავს — `/approve intent`",
                      agent=("" if intent.kind in KINDS else NEEDS_KIND)
                      + "გააგრძელე `/intent`-ის ინტერვიუ — ერთი კითხვა ერთ შეტყობინებაში, 2–3 ვარიანტითა და "
-                       "რეკომენდაციით; როცა ღია კითხვა აღარ დარჩება, მოკლედ აჩვენე, რა ჩაიწერა, და შესთავაზე `/approve intent`"
+                       "რეკომენდაციით; როცა ღია კითხვა აღარ დარჩება, გაუშვი მშენებლის შემოწმება (`/intent`, ნაბიჯი 4), "
+                       "მერე მოკლედ აჩვენე, რა ჩაიწერა, და შესთავაზე `/approve intent`"
                      + guide_note(g, "§1 — კითხვები (ისინი §7-ის შაბლონურ სიას ცვლის: §7-ში მხოლოდ ჯერ უპასუხო "
                                      "კითხვები დატოვე)"),
                      command="/approve intent", doc="intent.md")
@@ -898,7 +1008,8 @@ def project_stage(g: Graph) -> Stage:
                      agent="დაწერე პირველი სპეციფიკაცია: `/spec`" + guide_note(g, "§3 — პირველი ვერსიის ფარგლები"))
     spec = specs[-1]
     if spec.status != "approved":
-        return _review(2, spec, f"{spec.id} შენს გადახედვას ელოდება", "`/spec`; წარდგენამდე — spec-reviewer")
+        return _review(2, spec, f"{spec.id} შენს გადახედვას ელოდება",
+                       "`/spec`; წარდგენამდე — spec-reviewer და მშენებლის შემოწმება")
     adrs = [n for n in g.nodes.values() if n.type == "adr" and not n.foreign and not is_engine(n)]
     if not any(n.status == "accepted" for n in adrs):
         proposed = sorted((n for n in adrs if n.status == "proposed"), key=lambda n: n.id)

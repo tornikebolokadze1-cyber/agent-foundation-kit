@@ -10,7 +10,8 @@ Two stages (config.toml `stage`). Stage 1 runs Claude models only. Architecture 
 per topic): Opus writes a proposal -> Sonnet audits it and states its own position -> Opus writes
 the final synthesis with an ADR draft (proposed). Code loop (max 2 rounds per task): the
 interactive session (Sonnet) writes the code; Opus reviews the diff against the spec and
-REVIEW.md and returns a VERDICT. Stage 2 is the owner's decision and may name other providers,
+REVIEW.md and returns a VERDICT; tools/check_findings.py then checks each finding's place and quote,
+and one that does not check out is printed as not counting (meta.json `findings`). Stage 2 is the owner's decision and may name other providers,
 e.g. a ChatGPT checker through `codex exec -s read-only` (ChatGPT login, no API key).
 
 Every model is written provider:model. Each Claude step runs `claude -p --restricted` with
@@ -20,7 +21,8 @@ secret file at every folder depth, and an environment without other services' ke
 (tools/claude_cli.py); restricted mode itself keeps the file tools inside the working folder (measured
 2026-10-18: a path outside it and a link out of it were both refused). A secret file never enters a
 prompt: --context refuses one, and the reviewed diff leaves them out — the kinds come from one table,
-SECRET_KINDS, the same one the nested calls' deny rules are made from. Text from outside run.py — the topic, the plan, the diff, a
+SECRET_KINDS in tools/redact.py, the same one the nested calls' deny rules are made from. Text from
+outside run.py — the topic, the plan, the diff, a
 model's answer — goes into the next prompt between two markers that carry a random word chosen
 for that prompt, so it cannot pose as instructions. Prompts and answers pass through
 tools/redact.py. Every run gets a folder of its own, orchestration/runs/<id>/ (prompts, answers,
@@ -43,7 +45,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import fnmatch
 import hashlib
 import json
 import os
@@ -55,7 +56,7 @@ import subprocess
 import sys
 import tomllib
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -72,8 +73,9 @@ PROMPTS = Path(os.environ.get("ORCH_PROMPTS") or HERE / "prompts")
 SETTINGS = Path(os.environ.get("ORCH_SETTINGS") or HERE.parent / ".claude" / "settings.json")  # the engine's own rules
 sys.path.insert(0, str(HERE.parent / "tools"))
 import context_graph as cg  # noqa: E402
+from check_findings import check_text  # noqa: E402
 from claude_cli import find_claude, nested_env  # noqa: E402
-from redact import redact  # noqa: E402
+from redact import SECRET_KINDS, is_secret_path, redact  # noqa: E402  the secret files: both walls below
 
 EXIT_FAIL, EXIT_DISABLED, EXIT_CAP, EXIT_INPUT = 1, 3, 4, 5
 PROVIDERS = ("claude", "codex")
@@ -93,10 +95,6 @@ TEMPLATES = {  # every template and the values run.py fills into it — checked 
     "architect-synthesis.md": {"nonce", "topic", "proposal", "audit"},
     "code-checker.md": {"nonce", "round", "max_rounds", "plan_id", "task", "task_text", "spec_text", "review_md", "diff"},
 }
-SECRET_KINDS = (  # the kinds of secret file, at every folder depth: the one table both walls below are made from
-    "**/.env", "**/.env.*", "**/.envrc", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.jks", "**/id_rsa*",
-    "**/id_ed25519*", "**/id_ecdsa*", "**/credentials*.json", "**/serviceAccountKey*.json", "**/secrets/**",
-    "**/.ssh/**", "**/.aws/**")
 NESTED_DENY = [f"Read({p})" for p in SECRET_KINDS]  # for every nested Claude call; .env.example falls under .env.*
 DENY_PROBLEM = ("DENY RULES — no Read deny rules in .claude/settings.json; a nested Claude call would see the secret "
                 "files")
@@ -166,19 +164,6 @@ def records() -> list[dict]:
 
 def completed(loop: str, key: str) -> int:
     return sum(1 for r in records() if r.get("loop") == loop and r.get("key") == key and r.get("status") == "complete")
-
-
-def is_secret_path(rel: str) -> bool:
-    """A file that never goes into a prompt: one of SECRET_KINDS, read the way the deny rules read them (`**/` any
-    folder, `/**` anything inside that folder), ignoring case. A nested call cannot read .env.example either (.env.*),
-    so it is not offered as context or shown in a diff."""
-    parts = PurePosixPath(rel.replace("\\", "/").lower()).parts
-    for kind in (k.removeprefix("**/").lower() for k in SECRET_KINDS):
-        if kind.endswith("/**") and kind[:-3] in parts[:-1]:
-            return True
-        if not kind.endswith("/**") and parts and fnmatch.fnmatchcase(parts[-1], kind):
-            return True
-    return False
 
 
 def program(name: str) -> str:
@@ -681,9 +666,18 @@ def cmd_code_check(a: argparse.Namespace) -> int:
             raise StepFailed("checker", 0, "the review does not end with a line `VERDICT: approve | changes-requested | blocked`")
     except StepFailed as e:
         return fail(run_dir, meta, e)
-    meta.update(status="complete", finished=now(), verdict=verdict)
+    # REVIEW.md: a finding counts only when it is located and evidenced — the machine checks it, not the verdict
+    found_rc, problems, found_summary = check_text(review, ROOT)
+    problems, found_summary = [redact(p)[0] for p in problems], redact(found_summary)[0]  # they quote the raw answer
+    meta.update(status="complete", finished=now(), verdict=verdict,
+                findings={"pass": found_rc == 0, "summary": found_summary, "problems": problems[:20]})
     write_meta(run_dir, meta)
     print(f"checker verdict: {verdict} — {shown(run_dir)}/review.md (round {rnd}/{code['max_rounds']})")
+    print(found_summary)
+    if found_rc:
+        print("\n".join(f"  {p}" for p in problems[:20]))
+        print("these findings do not count until their location and quote check out — ask the checker again or "
+              "check the place yourself; never act on them as they are")
     if verdict != "approve" and rnd >= code["max_rounds"]:
         print("round cap reached — do not start a third round; report open critical/high findings to the owner as UNVERIFIED")
     return 0

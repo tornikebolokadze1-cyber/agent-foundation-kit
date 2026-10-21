@@ -24,6 +24,10 @@ Blocks with exit 2 (the reason goes to stderr, which Claude sees):
     G6  a secret file                 .env (not .env.example), *.pem, *.key, secrets/, ~/.ssh/… — never written
     S2  a redaction marker in content the sentinel hid a credential from the model; writing the marker
                                       back would destroy the real value (edit the other lines instead)
+    G7  always-loaded text over its   an edit that makes what every session loads (CLAUDE.md and its imports,
+        byte budget                   unscoped rules, skill and agent listings — tools/budget.py) grow past
+                                      `max_bytes` of the budget gate; a shrinking edit always passes; raising
+                                      `max_bytes` in tools/gates/gates.toml is the owner's (`/approve budget N`)
   A file outside the project still gets S2, G6 and G1 (by its name); another name for the project folder
   (//localhost/c$/…, //127.0.0.1/c$/…, a //?/C:/… long path) is read as the project itself.
   Bash | PowerShell
@@ -83,6 +87,7 @@ for _stream in (sys.stdin, sys.stdout, sys.stderr):
 
 CODE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(CODE_ROOT / "tools"))
+from budget import GATES as BUDGET_FILE, always_loaded, budget, budget_in, import_closure, kind as loaded_kind  # noqa: E402
 from context_graph import OWNER_STATUSES, PENDING_STATUSES, status_of, type_for_path  # noqa: E402
 from redact import MARKER_RE  # noqa: E402
 
@@ -331,12 +336,48 @@ def check_edit(tool: str, ti: dict, payload: dict, root: Path) -> int:
     if low == ENGINE_PYTHON_NOTE:
         return block("G2", f"{ENGINE_PYTHON_NOTE} გენერირებულია — მას მხოლოდ `.claude/hooks/py.sh` წერს (ნაპოვნი Python-ის "
                            "გზა). სხვა პროგრამაზე მითითება ყველა hook-ს Python-ის ნაცვლად იმ პროგრამით გაუშვებდა.")
+    over = check_budget(tool, ti, root, rel)
+    if over:
+        return over
     if fnmatch.fnmatchcase(low, "memory/episodes/ep-*.md"):
         return check_episode(tool, ti, payload, root, rel)
     typ = type_for_path(rel, ignore_case=True)  # Windows: ADR-0001 and adr-0001 are the same file
     if typ not in FROZEN:
         return 0
     return check_approvable(tool, ti, root / rel, typ)
+
+
+def check_budget(tool: str, ti: dict, root: Path, rel: str) -> int:
+    """G7: what every session loads must not grow past its byte budget; shrinking always passes (gbrain's
+    rule), and only the owner raises the budget."""
+    low = rel.lower()
+    if low != BUDGET_FILE and not loaded_kind(rel) and low not in import_closure(root) | {"claude.md"}:
+        return 0
+    before = read_norm(root / rel)
+    after = simulate(tool, ti, before)
+    if after is None:
+        return 0  # the edit cannot apply; the tool reports that itself
+    if low == BUDGET_FILE:
+        b0, b1 = budget_in(before or ""), budget_in(after)
+        if b0 is not None and (b1 is None or b1 > b0):
+            return block("G7", f"{rel}: ბიუჯეტს ({b0:,} ბაიტი ყოველთვის ჩატვირთულ ტექსტზე) მხოლოდ მფლობელი ზრდის ან "
+                               "აუქმებს — `/approve budget <N>`. შემცირება შეიძლება; სხვა ცვლილებისთვის max_bytes "
+                               "უცვლელი დატოვე.")
+        return 0
+    cap = budget(root)
+    if cap is None:
+        return 0  # no budget configured: nothing to hold (the gate says so at commit)
+    now = sum(always_loaded(root).values())
+    files = always_loaded(root, {rel: after})
+    total = sum(files.values())
+    if total <= cap or total <= now:
+        return 0
+    largest = " · ".join(f"{f} {n:,}" for f, n in sorted(files.items(), key=lambda kv: -kv[1])[:3])
+    return block("G7", f"{rel}: ყოველ სესიაში ჩატვირთული ტექსტი {now:,}-დან {total:,} ბაიტამდე გაიზრდებოდა — ბიუჯეტი "
+                       f"{cap:,}-ია, ზედმეტი {total - cap:,}. შეამოკლე ეს ან სხვა ყოველთვის ჩატვირთული ფაილი (უდიდესები: "
+                       f"{largest}): დეტალი გადაიტანე ფაილში, რომელიც მხოლოდ საჭიროებისას იკითხება, და აქ ერთხაზიანი "
+                       "მითითება დატოვე. შემცირება ყოველთვის გადის; ბიუჯეტს მხოლოდ მფლობელი ზრდის — `/approve budget "
+                       "<N>`. სია: `bash .claude/hooks/py.sh tools/budget.py`.")
 
 
 def check_episode(tool: str, ti: dict, payload: dict, root: Path, rel: str) -> int:

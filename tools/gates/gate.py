@@ -38,6 +38,7 @@ os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
+import budget  # noqa: E402
 import context_graph as cg  # noqa: E402
 import redact  # noqa: E402
 
@@ -460,6 +461,25 @@ def gate_tasks(root: Path, files: list[Path], **_) -> Result:
                   f"{', '.join(rel(root, p) for p in todo)}; ticked ones need a dated receipt  [input: tasks/*.md]", bad)
 
 
+def gate_budget(root: Path, files: list[Path], gate: dict | None = None, **_) -> Result:
+    """What every session loads stays under max_bytes, and max_bytes is no higher than the owner last approved."""
+    cap = (gate or {}).get("max_bytes")
+    if not isinstance(cap, int):
+        return Result("budget", "INCONCLUSIVE", "the budget gate has no integer max_bytes in gates.toml — nothing to hold")
+    loaded = budget.always_loaded(root)
+    if "CLAUDE.md" not in loaded:
+        return Result("budget", "INCONCLUSIVE", "no CLAUDE.md — nothing a session loads was measured")
+    total, owner = sum(loaded.values()), budget.owner_budget(root)
+    largest = ", ".join(f"{f} {n:,}" for f, n in sorted(loaded.items(), key=lambda kv: -kv[1])[:3])
+    bad = [f"over by {total - cap:,} bytes — shorten an always-loaded file (largest: {largest}); only the owner raises "
+           "the budget: /approve budget <N>"] if total > cap else []
+    if owner is not None and cap > owner:
+        bad.append(f"max_bytes {cap:,} is above the owner's last approved budget {owner:,} ({budget.LEDGER}) — only "
+                   "/approve budget raises it")
+    return Result("budget", "FAIL" if bad else "PASS", f"{total:,} of {cap:,} bytes loaded in every session, "
+                  f"{len(loaded)} file(s)  [input: CLAUDE.md and its imports, unscoped rules, skill and agent listings]", bad)
+
+
 HARNESS_PREFIXES = (".claude/hooks/", ".claude/settings", ".githooks/", "tools/", "orchestration/run.py",
                     "orchestration/decide.py", "orchestration/config.toml", "orchestration/prompts/")
 
@@ -483,7 +503,7 @@ def gate_drill(root: Path, files: list[Path], pre_commit: bool = False, **_) -> 
 
 BUILTINS = {"graph": gate_graph, "json": gate_json, "toml": gate_toml, "python": gate_python,
             "shell": gate_shell, "eol": gate_eol, "secrets": gate_secrets, "instructions": gate_instructions,
-            "tasks": gate_tasks, "drill": gate_drill}
+            "tasks": gate_tasks, "drill": gate_drill, "budget": gate_budget}
 
 
 def venv_python(root: Path) -> Path:
@@ -525,12 +545,12 @@ def run(root: Path, gates: list[dict], files: list[Path] | None, pre_commit: boo
         try:
             if "builtin" in g:
                 fn = BUILTINS[g["builtin"]]
-                res = fn(root, files if g["builtin"] == "graph" else all_files, pre_commit=pre_commit)
+                res = fn(root, files if g["builtin"] == "graph" else all_files, pre_commit=pre_commit, gate=g)
             else:
                 res = run_cmd_gate(root, g)
         except Exception as e:
             res = Result(g["id"], "INCONCLUSIVE", f"gate crashed: {type(e).__name__}: {e}")
-        res.summary += f"  [input: {source}]" if g.get("builtin") not in ("graph", "drill", "tasks", None) else ""
+        res.summary += f"  [input: {source}]" if g.get("builtin") not in ("graph", "drill", "tasks", "budget", None) else ""
         results.append(res)
     return results
 

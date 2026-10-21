@@ -51,7 +51,7 @@ rule).
 3. Plan `docs/plans/PLAN-NNNN-*.md` — tasks traced to requirements; the owner approves it.
 4. Code, test-first, one task per commit, on a branch.
 5. Gates green: `gate.py` (Commands) exits 0.
-6. Review against `REVIEW.md` (orchestration checker once enabled; max 2 rounds).
+6. Review against `REVIEW.md`; its findings pass `tools/check_findings.py` (max 2 rounds).
 7. The owner sees the result working.
 
 These steps are `plan.md`'s stages F1–F5 (intent → spec → architecture ADR → plan and build → show).

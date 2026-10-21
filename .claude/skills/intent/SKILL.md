@@ -24,6 +24,21 @@ argument-hint: "[what changed, or the owner's new answers]"
    template's list in §7: rewrite §7 as the guide's questions the idea has not answered yet, ask every one
    of them (none is skipped as obvious), and when one is answered, write the answer where it belongs and
    delete the question from §7. A question about the stack (what to build it with) waits for stage 3.
+   **How to ask.** Ask so that a plain „კი" agrees with your recommendation, and record such a yes as
+   **მფლობელი (დაეთანხმა რეკომენდაციას)** with the date — the choice is the owner's, the words are yours.
+   „როგორც შენ გინდა" or „არ ვიცი" is not a choice: say in one sentence what your recommendation decides and ask
+   again. When the person is stuck, ask about a concrete moment („ბოლოს როდის დაგჭირდა…?") or offer a guess for them
+   to correct. When they answer in their own words, drop the options and follow their words. A new wish that comes up
+   mid-interview goes at once into §4 as „მოგვიანებით" with its date, and the interview goes on. The interview is
+   done when nobody will ever have to ask what the person really meant.
+   **Builder check.** When §7 holds no question any more, run the builder check
+   ([builder-check.md](builder-check.md)) on `intent.md` before you offer `/approve intent`, and sort what it asks
+   into three piles: **answered already** (the conversation or a document holds the answer — write it in);
+   **minor** (a sensible builder could settle it without changing what gets built — decide it yourself and mark it
+   **ჰიპოთეზა**); **theirs** (only the person can answer it, and the answer changes what gets built). Ask the
+   person's pile in one message, most important first, at most three questions, each with its options and your
+   recommendation — the one exception to one question per message, because it is the last round. When you offer
+   `/approve intent`, name in a sentence or two the calls you made yourself, so the person can check them.
 5. **Keep the fixed structure** (§1 ხედვა … §8 წყაროები + ცვლილებების ისტორია). Goals keep stable IDs
    (G1, G2…) — never renumber; retire one with ~~strike-through~~ and the reason. Every goal has
    "how we measure". Every item names its source: **მფლობელი** (the owner said it — with the date) or

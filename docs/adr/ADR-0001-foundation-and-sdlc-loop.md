@@ -42,5 +42,5 @@ related:
 
 ## დადასტურება
 
-- gate `graph`: CHAIN-SPEC, CHAIN-PLAN, LEDGER, SUPERSEDE წესები ([[ADR-0006-deterministic-gates-and-evals]]).
+- gate `graph`: CHAIN-SPEC, CHAIN-PLAN, LEDGER, SUPERSEDE წესები ([[ADR-0006-deterministic-gates-and-evals]]); `review`-იდან სპეციფიკაციაზე — SPEC-TEMPLATE, SPEC-EMPTY, SPEC-QUESTIONS (შაბლონის ნარჩენი, ცარიელი უჯრა, სამზე მეტი ღია კითხვა) და SPEC-NO-TEMPLATE (შაბლონის ფაილი აკლია, ამიტომ შემოწმების ნახევარი ვერ გაეშვა — ეს გავლად არ ითვლება).
 - დრილი: დამტკიცების გაყალბების მცდელობა (guard G4/G5/B1) უნდა დაიბლოკოს; `approve.py` წინაპირობის გარეშე უნდა უარი თქვას.

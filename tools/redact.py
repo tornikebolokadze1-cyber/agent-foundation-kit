@@ -7,13 +7,18 @@
   tools/observe.py            never prints a secret in the observatory report
   tools/gates/drill.py        seeds one random token per kind and proves each one is caught
 
+and one table of secret FILES (SECRET_KINDS): orchestration/run.py lets no nested Claude call read one, and
+tools/check_findings.py refuses a review's citation of one without opening it.
+
 Standard library only. Each provider pattern matches that provider's token prefix, and the three readers
 share this one list, so a value one of them calls a secret the others do too. No entropy threshold on purpose: gitleaks
 already has one (and the blind spot that comes with it) — the two checks miss different things.
 """
 from __future__ import annotations
 
+import fnmatch
 import re
+from pathlib import PurePosixPath
 
 # The replacement text. Built from parts so this file never contains a literal marker the guard's
 # S2 rule (writing a redaction marker into a file) would refuse.
@@ -51,6 +56,18 @@ SECRET_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("bearer-token", re.compile(r"(?i)\bauthorization\s*:\s*bearer\s+(?P<secret>[A-Za-z0-9._~+/-]{20,}=*)")),
     # credentials embedded in a URL — the password between `user:` and `@host`: only the password group is hidden.
     ("url-credential", re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s/:@]+:(?P<secret>[^\s/:@]+)@")),
+    # A value assigned to a secret's name, with no provider prefix to know it by: `DB_PASSWORD = "…"`,
+    # `password: '…'`, JSON's `"token": "…"`, an escaped `\"…\"`. The name ends with the secret word (`tokenizer`,
+    # `token_type`, `author` are not secrets) and may begin with anything (`DB_`, `my`), so the match starts at the word
+    # itself: one that first walked the name's beginning rescanned a run of dots or dashes from each of them — 24 s for
+    # 32 KB, on every tool output (review S1, 2026-10-21). Only a quoted value of 8+ characters with a letter and a digit
+    # counts: `password = get_password()`, an env name (`"OPENAI_API_KEY"`) or a template (`"${DB_PASSWORD}"`) pass.
+    # Last in the list, so a provider's own kind wins on the same span. Idea: ECC observe.sh (MIT).
+    ("named-secret", re.compile(
+        r"(?i)(?:pass(?:word|wd|phrase)|pwd|secret|token|api[_-]?key|access[_-]?key|"
+        r"private[_-]?key|credentials?|auth)s?\d*\\?[\"']?[ \t]*(?::=|=>|[:=])[ \t]*"
+        r"(?P<q>\\?[\"'])(?P<secret>(?=[^\"'\\\s$<>(){}]*[A-Za-z])(?=[^\"'\\\s$<>(){}]*\d)[^\"'\\\s$<>(){}]{8,256})"
+        r"(?P=q)")),
 ]
 
 # A line that announces itself as fake is documentation, not a leak. A decoy word counts only as a word of its own
@@ -171,3 +188,24 @@ def text_of(obj) -> str:
     if isinstance(obj, dict):
         return "\n".join(text_of(x) for x in obj.values())
     return ""
+
+
+# Secret files, at every folder depth: the one table orchestration/run.py's deny rules for nested Claude calls are made
+# from, and the files tools/check_findings.py never opens when a review names one (review S2, 2026-10-21).
+SECRET_KINDS = (
+    "**/.env", "**/.env.*", "**/.envrc", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.jks", "**/id_rsa*",
+    "**/id_ed25519*", "**/id_ecdsa*", "**/credentials*.json", "**/serviceAccountKey*.json", "**/secrets/**",
+    "**/.ssh/**", "**/.aws/**")
+
+
+def is_secret_path(rel: str) -> bool:
+    """A file that never goes into a prompt: one of SECRET_KINDS, read the way the deny rules read them (`**/` any
+    folder, `/**` anything inside that folder), ignoring case. A nested call cannot read .env.example either (.env.*),
+    so it is not offered as context or shown in a diff."""
+    parts = PurePosixPath(rel.replace("\\", "/").lower()).parts
+    for kind in (k.removeprefix("**/").lower() for k in SECRET_KINDS):
+        if kind.endswith("/**") and kind[:-3] in parts[:-1]:
+            return True
+        if not kind.endswith("/**") and parts and fnmatch.fnmatchcase(parts[-1], kind):
+            return True
+    return False

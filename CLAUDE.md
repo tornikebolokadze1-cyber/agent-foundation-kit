@@ -45,7 +45,7 @@ conversation: for a new topic recommend `/session-close` and a new session.
 Skills may create new skills only after the owner says yes to a proposal in `memory/PROPOSALS.md`.
 
 ### Hooks you will meet (ADR-0004, ADR-0007)
-- `GUARD[G1…G6, B1…B4, S1, S2]` — a PreToolUse refusal with its reason (G6/B4: secret files — never written,
+- `GUARD[G1…G7, B1…B4, S1, S2]` — a PreToolUse refusal with its reason (G6/B4: secret files — never written,
   never read, never staged; S1: printing a secret-named variable; S2: writing a `[REDACTED:…]` marker back).
   It is deterministic: change course (ask the owner, reopen a document, write a superseding ADR); never look
   for a way around it.
