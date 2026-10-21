@@ -40,12 +40,19 @@ Two fix rounds at most. If a blocking finding survives them, the result is **UNV
 ```
 FINDING <n>
 severity: critical | high | medium | low
-where: <file:line | SPEC-0001 §5 AC-003>
+where: <file:line or file:a-b, relative to the project root | SPEC-0001 §5 AC-003 | ADR-0003 | D-070>
 claim: <what is wrong, one sentence>
-evidence: <quote, command output, or reasoning a third party can check>
+evidence: <for code: first a quote of the cited lines in backticks, then command output or reasoning a third party can check>
 fix: <smallest change that resolves it>
+
+UNRESOLVED <n>
+where: <file:line | document id>
+missing: <the one fact that would decide it>
+who: <who or what can show it — a person, a file, a command>
 
 VERDICT: approve | changes-requested | blocked
 ```
+
+An UNRESOLVED item is not a finding and carries no severity: it names exactly what the reviewer could not see, instead of guessing in either direction. A machine checks every review — `bash .claude/hooks/py.sh tools/check_findings.py <review file>` (the orchestration code loop runs it itself): each file:line exists inside the project and is not a secret file (`.env`, `*.key`… are refused without being opened), the evidence's first code quote (12+ characters) is written within 3 lines of it, a document id names a document that exists, an UNRESOLVED item has no severity, and the closing line agrees with the findings. A finding it rejects does not count until its place and quote check out.
 
 The architecture checker ends with `POSITION: agree | agree-with-changes | disagree` instead of VERDICT, after stating the alternative it would choose and why. Both lines are the answer's last line, exactly: a run without it counts as failed (`orchestration/run.py`).

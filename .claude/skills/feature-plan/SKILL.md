@@ -21,6 +21,12 @@ missing. (`approve.py` refuses a plan on an unapproved spec, and the CHAIN-PLAN 
    off, T1 switches them on (part B, step 1) with the first test and the code that makes it pass; every
    task writes its failing test/eval first (TDD) and commits only when it is green. Any install the plan
    needs is named in the task, so the person's yes is asked once, when that task starts.
+   **Slices the person can see.** Each task is a vertical slice — a thin path through every layer
+   the feature needs that works on its own, not "all the data first, every screen later" — and at least one
+   of the first three tasks ends with something the person can open and see (a page, a screen, a printed
+   result); its verify says where and what. A step that `git revert` cannot undo — sending a message or an
+   e-mail, publishing, deleting or migrating real data, paying, opening an account — is a question to the
+   person first, and its task says so.
 4. List which gates must be green, which new gates or eval cases this plan adds (each with a drill),
    and the rollback path.
 5. Add a row to `docs/plans/README.md`; run `bash .claude/hooks/py.sh tools/context_graph.py check <file>`.
@@ -37,8 +43,9 @@ missing. (`approve.py` refuses a plan on an unapproved spec, and the CHAIN-PLAN 
    sentence saying why to say yes, and never ask them to edit it by hand.
 2. For each task: write the test/eval and run it — see it fail — then the code → `bash .claude/hooks/py.sh tools/gates/gate.py`
    green → tick the box → CHECKPOINT commit. Then go straight on to the next task in the same reply; stop
-   only when the person is needed (a yes for an install or a protected file, an account, a decision, or a
-   result to look at) — never end a reply with "I'll start the next task" and wait.
+   only when the person is needed (a yes for an install, a protected file or a step `git revert` cannot
+   undo; an account, a decision, or a result to look at) — never end a reply with "I'll start the next task"
+   and wait.
 3. If orchestration is enabled (`orchestration/config.toml`): after the task's code is ready, run
    `bash .claude/hooks/py.sh orchestration/run.py code-check --plan PLAN-NNNN --task T<n>` (the owner is asked).
    Fix critical/high findings; at most 2 rounds — after that report open findings as UNVERIFIED.

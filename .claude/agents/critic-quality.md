@@ -67,7 +67,9 @@ that distinguishes a lens that checked every symbol from one that did nothing.
 id | severity | location (file:line) | what is dead / drifted / unearned | one-line fix
 ```
 
-`id` is your own label, `Q1`, `Q2`, … in the order you emit them.
+`id` is your own label, `Q1`, `Q2`, … in the order you emit them. The fourth column opens with a quote of the cited
+line in backticks (12+ characters): `tools/check_findings.py` checks that the file and line exist and that the quote is
+written there — a row whose place or quote does not check out does not count.
 
 Then exactly one closing line:
 

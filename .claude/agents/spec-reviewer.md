@@ -16,7 +16,9 @@ Check:
 1. **Traceability** — every REQ traces to a goal G* that exists; no goal the spec claims to serve is
    left without a requirement; nothing is in scope that intent lists as a non-goal.
 2. **Testable acceptance criteria** — every AC is Given/When/Then, observable, and names the gate,
-   test or eval that proves it. "Works well", "fast", "natural" without a number is a finding.
+   test or eval that proves it. "Works well", "fast", "natural" without a number is a finding. Its
+   „რას დაინახავ ან გააკეთებ" cell says what the person will see or do to check it — or says in words that
+   nobody can see it; a vague cell („მუშაობს") is a finding.
 3. **Domain truth** — nothing contradicts the verified facts in `docs/domain/` or the owner's decisions
    recorded in `intent.md`; a fact older than its re-check rule is re-verified, not assumed.
 4. **Domain invariants** from REVIEW.md — each one that the spec touches is stated as a requirement and

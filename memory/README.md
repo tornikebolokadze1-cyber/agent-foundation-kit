@@ -15,7 +15,7 @@ title: მეხსიერების რუკა — რა სად ი�
 | სემანტიკური | [[intent]], `docs/specs/`, `docs/adr/`, `docs/domain/` | `/intent`, `/spec`, `/adr` + მფლობელის `/approve` | გრაფით ([[ADR-0003-context-graph-obsidian]]) |
 | პროცედურული | `.claude/skills`, `.claude/agents`, `.claude/rules`, `.claude/hooks`, [[REVIEW]], `tools/gates/` | მფლობელის თანხმობით | skill — გამოძახებისას; rule — შესაბამისი ფაილის წაკითხვისას |
 | პერსპექტიული | [[PROPOSALS]] + [[plan]] backlog | აგენტი წერს წინადადებას, მფლობელი წყვეტს | რაოდენობა — ყოველ SessionStart-ზე |
-| რეფლექსიური | [[LESSONS]] (≤60 ხაზი) | `/reflect`, `/session-close` | ყოველ სესიაში — CLAUDE.md მას იმპორტს უკეთებს |
+| რეფლექსიური | [[LESSONS]] (ყოველთვის ჩატვირთული ტექსტის ბაიტების ბიუჯეტში — `tools/budget.py`) | `/reflect`, `/session-close` | ყოველ სესიაში — CLAUDE.md მას იმპორტს უკეთებს |
 | დამტკიცებები | [[approvals]] | მხოლოდ `tools/approve.py` (მფლობელის `/approve`) | gate-ის LEDGER შემოწმება |
 | გრაფი (წარმოებული) | `memory/graph/` — git-ში არ ინახება | `tools/context_graph.py` | SessionStart-ის ბრიფი; `query <id>` |
 | მანქანის ავტო-მეხსიერება | `~/.claude/projects/…/memory/` (რეპოს გარეთ) | Claude, თავისით | ავტომატურად; **კანონიკური წყარო მაინც ეს რეპოა** |

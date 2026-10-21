@@ -1,0 +1,65 @@
+[
+ {
+  "critic": "critic-correctness",
+  "case": "clean control",
+  "model": "opus",
+  "state": "ARMED",
+  "detail": "VERDICT OK; FINDINGS PASS: 0 finding(s), 0 unresolved, closing: CORRECTNESS: 0 critical, 0 high, 0 medium, 0 low — VERDICT OK",
+  "cost_usd": 0.0495316,
+  "answer": "CHECKS: requirements with a falsifying test 3/3 | edge paths walked: empty list (raises ValueError at median.py:7), single element (mid=0, returns it), two elements (mid-1=0, mid=1), unsorted input (sorted at :8; both tests use unsorted input, so a missing sort would fail them), duplicates, negatives, floats, even length whose mean is not a whole number ([4,1,3,2] → 2.5, which catches `//`), odd/even off-by-one at mid, empty generator (not a sequence, so out of scope), very large ints divided with `/` (gives the same float as `statistics.median`, and no requirement covers it) | inadequate-test suspicion: none. Each test pins an exact value or exception, and the `test_` methods in a `unittest.TestCase` are collected by the runner.\n\nCORRECTNESS: 0 critical, 0 high, 0 medium, 0 low — VERDICT OK"
+ },
+ {
+  "critic": "critic-correctness",
+  "case": "a missing upper bound behind a green suite",
+  "model": "opus",
+  "state": "ARMED",
+  "detail": "VERDICT FAIL; FINDINGS PASS: 1 finding(s), 0 unresolved, closing: CORRECTNESS: 0 critical, 1 high, 0 medium, 0 low — VERDICT FAIL",
+  "cost_usd": 0.040886,
+  "answer": "CHECKS: requirements with a falsifying test 2/3 (R1 → `test_clamp.py:8`, R3 → `test_clamp.py:11`, R2 has no code and no test) | edge paths walked: below low, above high, value == low, value == high, low > high (out of scope), negative values, float/NaN (out of scope) | inadequate-test suspicion: the suite never calls clamp with a value above high, so it passes even though requirement 2 was never written. Note: no `REVIEW.md` exists in the folder, so I used the severity scale from the brief.\n\nC1 | HIGH | clamp.py:8 | `return value` runs for every value ≥ low, because there is no upper-bound check. `clamp(15, 0, 10)` → returns `15`, should return `10`. Fails requirement 2. | add `if value > high: return high` before `return value`, plus a test `assertEqual(clamp(15, 0, 10), 10)`\n\nCORRECTNESS: 0 critical, 1 high, 0 medium, 0 low — VERDICT FAIL"
+ },
+ {
+  "critic": "critic-quality",
+  "case": "clean control",
+  "model": "sonnet",
+  "state": "ARMED",
+  "detail": "VERDICT OK; FINDINGS PASS: 0 finding(s), 0 unresolved, closing: CODE-QUALITY: 0 high, 0 medium, 0 low — VERDICT OK",
+  "cost_usd": 0.0197574,
+  "answer": "CHECKS: added symbols reachable 1/1 | new abstractions with 2+ callers 0/0 (none added) | neighbouring file read: test_median.py (no other neighbours exist in the folder)\n\nCODE-QUALITY: 0 high, 0 medium, 0 low — VERDICT OK"
+ },
+ {
+  "critic": "critic-quality",
+  "case": "a one-caller factory and a function nothing calls",
+  "model": "sonnet",
+  "state": "ARMED",
+  "detail": "VERDICT OK; FINDINGS PASS: 3 finding(s), 0 unresolved, closing: CODE-QUALITY: 0 high, 2 medium, 1 low — VERDICT OK",
+  "cost_usd": 0.0165128,
+  "answer": "CHECKS: added symbols reachable 4/5 | new abstractions with 2+ callers 0/2 | neighbouring file read: none (pricing.py is the only file in the folder)\n\nQ1 | MEDIUM | pricing.py:20 | `def _legacy_round(amount, places=2):` is dead code. Nothing calls it, and `format` uses `%.2f` instead. | Delete `_legacy_round`.\nQ2 | MEDIUM | pricing.py:4 | `class PriceFormatterFactory:` is a factory with one caller (`format_price`). Its `build()` only forwards `currency` to `PriceFormatter`, so it adds a layer and nothing else. | Delete the factory and construct `PriceFormatter` directly, or drop both classes.\nQ3 | LOW | pricing.py:12 | `class PriceFormatter:` is a class with one caller and one method, and it holds only a currency string. `format_price` builds and discards it on every call. | Collapse into `return \"%.2f %s\" % (amount, currency)` inside `format_price`.\n\nCODE-QUALITY: 0 high, 2 medium, 1 low — VERDICT OK"
+ },
+ {
+  "critic": "critic-security",
+  "case": "clean control",
+  "model": "opus",
+  "state": "ARMED",
+  "detail": "VERDICT OK; FINDINGS PASS: 0 finding(s), 0 unresolved, closing: SECURITY: 0 critical, 0 high, 0 medium, 0 low — VERDICT OK",
+  "cost_usd": 0.046360599999999995,
+  "answer": "CHECKS: inputs traced to sinks 1/1 (`values` in `median.py:4` → `sorted()` and arithmetic in `median.py:8-12` and nothing else; no shell, SQL, DOM, filesystem, deserializer, `eval` or model-prompt sink) | secrets scanned: median.py, test_median.py (no credentials, tokens, keys, connection strings or logged secrets; error message at `median.py:7` is a static string with no input in it) | path confinement: ok (no filesystem paths are built or opened) | instruction/data confusion: none (nothing is sent to a model, shell or template)\n\nSECURITY: 0 critical, 0 high, 0 medium, 0 low — VERDICT OK"
+ },
+ {
+  "critic": "critic-security",
+  "case": "a path joined from a user-named file, with no containment",
+  "model": "opus",
+  "state": "ARMED",
+  "detail": "VERDICT FAIL; FINDINGS PASS: 1 finding(s), 0 unresolved, closing: SECURITY: 1 critical, 0 high, 0 medium, 0 low — VERDICT FAIL",
+  "cost_usd": 0.0452974,
+  "answer": "CHECKS: inputs traced to sinks 1/1 | secrets scanned: uploads.py (none found; REVIEW.md not present in folder) | path confinement: gap | instruction/data confusion: none\n\nS1 | CRITICAL | uploads.py:9 | `path = os.path.join(BASE, name)`: `name` is user-supplied (the module docstring at line 1 says \"user-named\"). It goes into `os.path.join` and then straight to `open(path, \"r\")` at line 10 with no check in between. With `name=\"../../etc/passwd\"` the path walks up out of `/srv/uploads`. An absolute `name=\"/etc/passwd\"` is worse: `os.path.join` drops `BASE` completely. A symlink planted inside the uploads directory is also followed. Any of these lets the caller read any file the process can read, outside the uploads tree. | Resolve with `real = os.path.realpath(os.path.join(BASE, name))` and reject unless `os.path.commonpath([real, os.path.realpath(BASE)]) == os.path.realpath(BASE)`, or reject any `name` that isn't a single plain path component.\n\nSECURITY: 1 critical, 0 high, 0 medium, 0 low — VERDICT FAIL"
+ },
+ {
+  "critic": "critic-security",
+  "case": "a file read through a helper that is not in the folder (the deciding fact is not visible)",
+  "model": "opus",
+  "state": "DEAD",
+  "detail": "its rows do not check out — they do not count (VERDICT INCONCLUSIVE; FINDINGS FAIL: 1 problem(s) — 0 finding(s), 1 unresolved, closing: SECURITY: 0 critical, 0 high, 0 medium, 0 low — VERDICT INCONCLUSIVE; first problem: U1 (reports.py:9): [quote-absent] `storage.safe_join` is not within 3 lines of reports.py:9)",
+  "cost_usd": 0.041252800000000006,
+  "answer": "CHECKS: inputs traced to sinks 1/1 | secrets scanned: reports.py (none found; REVIEW.md not present in folder) | path confinement: gap: `name` from the URL reaches `open()` only through `storage.safe_join`, and that function's code is not in the change | instruction/data confusion: none\n\nU1 | UNRESOLVED | reports.py:9 | The only thing standing between the URL-supplied `name` and `open()` is `storage.safe_join`, and its code isn't in this change. I can't tell from the files whether it resolves the joined path (including symlinks), checks that the result stays under `/srv/reports`, rejects absolute `name` values and `..` segments, and raises an error instead of returning a fallback path. The function's name alone doesn't prove any of that. If it doesn't do these things, this is arbitrary file read (CRITICAL). | The `storage` module source, plus a test that calls `read_report(\"../../etc/passwd\")`, an absolute path, and a symlink pointing outside the base, and expects each to be rejected.\n\nSECURITY: 0 critical, 0 high, 0 medium, 0 low — VERDICT INCONCLUSIVE"
+ }
+]

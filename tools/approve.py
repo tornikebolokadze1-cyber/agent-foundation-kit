@@ -14,6 +14,9 @@ re-run the graph check on the touched files, and roll everything back if the che
 finds a new error. It always exits 0 and prints a Georgian result, because a non-zero
 exit would abort the /approve skill and hide the message from the owner.
 
+`budget N` sets the owner's byte budget for the text every session loads:
+max_bytes of the budget gate in tools/gates/gates.toml, with its own ledger row.
+
 The guard (.claude/hooks/guard.py) stops the agent from running this file or writing
 the ledger; the LEDGER check in tools/context_graph.py catches an approval status that
 has no row here, however it got there.
@@ -33,6 +36,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import budget  # noqa: E402
 import context_graph as cg  # noqa: E402
 
 USAGE = """გამოყენება:
@@ -42,6 +46,7 @@ USAGE = """გამოყენება:
   /approve plan 0001              PLAN-0001 → approved   (საჭიროა: მისი spec approved)
   /approve adr 0001               ADR-0001 → accepted    (თუ supersedes აქვს, ძველი → superseded)
   /approve reject adr 0001 მიზეზი  ADR-0001 → rejected
+  /approve budget 34000           ყოველ სესიაში ჩატვირთული ტექსტის ბიუჯეტი, ბაიტებში
 ბოლოს შეგიძლია შენიშვნა დაურთო: /approve adr 0001 ვეთანხმები, ოღონდ …"""
 
 TARGET = {"intent": "accepted", "spec": "approved", "plan": "approved", "adr": "accepted"}
@@ -98,6 +103,9 @@ def parse_args(raw: str) -> tuple[str, str, str, str]:
     if not toks:
         return "help", "", "", ""
     head = toks[0].lower()
+    if head in ("budget", "ბიუჯეტი"):
+        num = (toks[1] if len(toks) > 1 else "").replace(",", "").replace("_", "")
+        return ("approve" if action == "approve" and num.isdigit() else "help"), "budget", num, " ".join(toks[2:])
     m = re.fullmatch(r"(adr|spec|plan)-(\d+)", head)
     if m:
         return action, m.group(1), f"{int(m.group(2)):04d}", " ".join(toks[1:])
@@ -192,6 +200,37 @@ def apply(g: cg.Graph, changes: list[tuple[cg.Node, str]], note: str, new_doc: c
         return f"ცვლილება გაუქმდა (rollback): {e}"
 
 
+def set_budget(root: Path, new: int, note: str) -> str:
+    """The owner's byte budget for the text every session loads: max_bytes in gates.toml and a ledger row —
+    both or neither. The guard keeps the agent from raising it (G7); the budget gate holds the total under it."""
+    path = root / budget.GATES
+    try:
+        before = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return f"❌ {budget.GATES} ვერ წავიკითხე: {e}"
+    old = budget.budget_in(before)
+    blocks = before.split("[[gate]]")
+    at = [i for i, b in enumerate(blocks) if re.search(r'(?m)^id\s*=\s*"budget"', b)]
+    if old is None or len(at) != 1:
+        return f"❌ {budget.GATES}-ში `budget` gate-ს max_bytes არ აქვს — ბიუჯეტი ჯერ არ არსებობს."
+    blocks[at[0]], n = re.subn(r"(?m)^(max_bytes[ \t]*=[ \t]*)[\d_]+", rf"\g<1>{new}", blocks[at[0]], count=1)
+    after = "[[gate]]".join(blocks)
+    if n != 1 or budget.budget_in(after) != new:
+        return "❌ max_bytes ვერ შეიცვალა — ფაილი უცვლელია."
+    ledger_before = ledger_text(root)
+    path.write_text(after, encoding="utf-8", newline="\n")
+    try:
+        write_ledger(root, ledger_before, [ledger_row("budget", f"{old:,}", f"{new:,}", budget.GATES,
+                                                      note or "ყოველ სესიაში ჩატვირთული ტექსტის ბიუჯეტი, ბაიტებში")])
+    except OSError as e:
+        path.write_text(before, encoding="utf-8", newline="\n")
+        return f"❌ ჟურნალში ჩაწერა ვერ მოხერხდა ({e}) — ბიუჯეტი უცვლელია."
+    total = sum(budget.always_loaded(root).values())
+    tail = (f"ახლა {total:,} ბაიტი იტვირთება — ბიუჯეტს ზემოთ, ამიტომ შემოწმება ჩავარდება, სანამ ტექსტი არ შემცირდება."
+            if total > new else f"ახლა {total:,} ბაიტი იტვირთება, დარჩა {new - total:,}.")
+    return f"✅ ყოველ სესიაში ჩატვირთული ტექსტის ბიუჯეტი: {old:,} → {new:,} ბაიტი. {tail} ჩაიწერა memory/approvals.md-ში."
+
+
 def list_pending(g: cg.Graph) -> str:
     pend, eng = cg.pending(g), cg.pending(g, engine=True)
     lines = ["შენს დამტკიცებას ელოდება:"] if pend else ["პროექტში ამჟამად არაფერი ელოდება შენს დამტკიცებას."]
@@ -216,12 +255,15 @@ def next_step(root: Path, doc: cg.Node) -> str:
 def main(argv: list[str]) -> int:
     raw = " ".join(argv[1:]).strip().strip("'\"")
     root = root_dir()
+    action, kind, num, note = parse_args(raw)
+    if kind == "budget" and action == "approve":
+        print(set_budget(root, int(num), note))
+        return 0
     try:
         g = cg.load(root)
     except Exception as e:
         print(f"❌ პროექტის წაკითხვა ვერ მოხერხდა ({root}): {e}")
         return 0
-    action, kind, num, note = parse_args(raw)
     if action == "help":
         print(f"❌ ვერ გავიგე: „{raw}“\n\n{USAGE}")
         return 0

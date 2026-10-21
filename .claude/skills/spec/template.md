@@ -33,9 +33,9 @@ related: []
 
 ## 5. მიღების კრიტერიუმები
 
-| ID | Given / When / Then | რა ამტკიცებს (gate / test / eval) |
-|---|---|---|
-| AC-001 | Given … When … Then … | ტესტი: … (ან gate, ან eval — AI აგენტისთვის) |
+| ID | Given / When / Then | რას დაინახავ ან გააკეთებ | რა ამტკიცებს (gate / test / eval) |
+|---|---|---|---|
+| AC-001 | Given … When … Then … | … | ტესტი: … (ან gate, ან eval — AI აგენტისთვის) |
 
 ## 6. არაფუნქციური მოთხოვნები
 

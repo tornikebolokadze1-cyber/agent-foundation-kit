@@ -14,7 +14,10 @@ comes first (a spec cannot be approved before that — `approve.py` refuses and 
 2. **New file** — next free number `SPEC-NNNN`; `docs/specs/SPEC-NNNN-<english-kebab-slug>.md` from
    [template.md](template.md). Revising an approved spec: reopen it first (status only → draft).
 3. **Fill every section.** Requirements `REQ-NNN` each trace to a goal G*. Acceptance criteria are
-   Given / When / Then, testable, and each names the gate, test or eval that will prove it. Include
+   Given / When / Then, testable, and each names the gate, test or eval that will prove it — and, in the
+   column „რას დაინახავ ან გააკეთებ", what the person will see or do to check it with their own eyes
+   („ტელეფონზე გახსნი გვერდს და პირველ ეკრანზე ღილაკს დაინახავ"); a criterion nobody can see says so in
+   words („თვალით არ ჩანს — ამას ტესტი ამტკიცებს"), never an empty cell or a dash. Include
    Georgian-language quality, grounding and the domain invariants (`REVIEW.md`, `docs/domain/`) where they
    apply. Anything unknown → "ღია კითხვები", never a guess. The first version's scope and example criteria
    for this kind of project are in `docs/guides/<kind>.md` §3. Keep a first version's spec small enough for
@@ -24,8 +27,13 @@ comes first (a spec cannot be approved before that — `approve.py` refuses and 
 4. **Index** — add a row to `docs/specs/README.md` (wikilink to the file). When complete, set
    `status: review`.
 5. **Review** — run the `spec-reviewer` subagent on the file. Fix critical/high findings; record the
-   rest under "ღია კითხვები".
-6. **Check** — `bash .claude/hooks/py.sh tools/context_graph.py check <file>`; fix every error.
+   rest under "ღია კითხვები". Then the builder check ([builder-check.md](../intent/builder-check.md)) on the
+   spec, its questions sorted into the same three piles as in `/intent` step 4: the person's pile — at most
+   three, in one message — goes with the summary of step 7, and their answers go into the spec before they
+   approve it.
+6. **Check** — `bash .claude/hooks/py.sh tools/context_graph.py check <file>`; fix every error. From
+   `review` on it also fails on a line left from the template, an empty cell in the requirements or criteria
+   table, or more than 3 open questions.
 7. **Tell the owner** — 3–5 Georgian sentences: what the spec covers, what is out of scope, what they
    must decide; this summary is what they judge — never ask them to read the file. The approval is
    `/approve spec NNNN`. Planning (`/feature-plan`) starts only after it.

@@ -32,7 +32,8 @@ actually happened in this session — no plans presented as done.
    progress.md and plan.md reflect it, then set `needs_reconcile: false` and
    `reconciled_at: <now_utc>` in that episode (the only fields you may change in another session's episode).
 5. **Lessons** — if something failed twice or cost real time, add it to `memory/LESSONS.md` in the file's
-   format, including "Guarded by: <check> | none". Keep the file ≤ 60 lines (merge or retire old ones).
+   format, including "Guarded by: <check> | none". The file counts against the byte budget of what every session loads — `bash .claude/hooks/py.sh tools/budget.py`
+   shows what is left; a lesson that does not fit merges with or retires an old one (the guard, G7, refuses the growth).
 6. **Proposals** — new skill / gate / ADR / spec / tool ideas go to `memory/PROPOSALS.md` as
    `- [ ] **P-NNN** …` (next free number) before `<!-- auto: proposals:end -->`. Never create a skill or
    install anything without the owner's yes.
