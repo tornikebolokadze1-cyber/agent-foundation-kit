@@ -51,10 +51,12 @@ Environment (drills set these so they never touch real state):
                        may contain arguments, forward slashes only
   EPISODIC_CATCHUP_HOURS  idle hours before an open episode is caught up (default 6)
   EPISODIC_COMPACT_WAIT_S seconds compact-verify waits for the summary (default 120)
+  EPISODIC_LOCK_WAIT_S seconds a writer of progress.md / PROPOSALS.md waits for another one (default 30)
 """
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -63,6 +65,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -91,6 +94,9 @@ SUMMARY_TIMEOUT_S = 240
 MAX_CATCHUPS_PER_START = 2
 COMPACT_WAIT_S = 120          # how long compact-verify waits for a compaction's summary to reach a transcript
 FINGERPRINT_CHARS = 600       # start of the <summary> body that identifies one compaction
+LOCK_WAIT_S = float(os.environ.get("EPISODIC_LOCK_WAIT_S") or 30)  # a writer of progress.md / PROPOSALS.md waits
+LOCK_STALE_S = 300            # a lock this old was left by a writer that died
+CLOSE_HEADING_RE = re.compile(r"(?m)^## დახურვა — (\S+)")  # cmd_end's heading: when the session ended
 
 # The intake contract: every proposal and lesson comes with a verdict, the ids it was compared with and a
 # quote the machine can find; every decision with a quote that tells whose decision it was.
@@ -219,6 +225,41 @@ def write_atomic(p: Path, text: str) -> None:
     with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
     os.replace(tmp, p)
+
+
+def take_lock(lock: Path, name: str) -> bool:
+    end = time.monotonic() + LOCK_WAIT_S
+    while True:
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return True
+        except (FileExistsError, PermissionError):  # Windows: PermissionError while another writer deletes it
+            pass
+        try:
+            if time.time() - lock.stat().st_mtime > LOCK_STALE_S:
+                lock.unlink(missing_ok=True)
+                log(f"lock for {name}: left by a writer that died — taken over")
+                continue
+        except OSError:
+            pass  # gone between the two calls: try again
+        if time.monotonic() > end:
+            log(f"lock for {name}: still held after {LOCK_WAIT_S:g} s — not written")
+            return False
+        time.sleep(0.1)
+
+
+@contextmanager
+def locked(p: Path):
+    """One writer at a time for a file every session's summarizer rewrites: two of them reading, changing and
+    replacing progress.md together kept only the later one's entry (review 2026-10-22 M1). The lock is a file in the
+    state folder, created the one way every system creates a file exclusively. Yields False when it never came free."""
+    lock = state_dir() / f"lock-{hashlib.sha1(str(p.resolve()).encode('utf-8')).hexdigest()[:16]}"
+    held = take_lock(lock, p.name)
+    try:
+        yield held
+    finally:
+        if held:
+            lock.unlink(missing_ok=True)
 
 
 def fm_get(text: str, key: str, default: str = "") -> str:
@@ -505,6 +546,11 @@ def upsert_progress_entry(root: Path, ep_id: str, entry: str) -> bool:
     p = root / "progress.md"
     if not p.exists():
         return False
+    with locked(p) as held:
+        return held and write_progress_entry(p, ep_id, entry)
+
+
+def write_progress_entry(p: Path, ep_id: str, entry: str) -> bool:
     text = read(p)
     start_m, end_m = "<!-- auto: log:start -->", "<!-- auto: log:end -->"
     if start_m not in text or end_m not in text:
@@ -523,6 +569,11 @@ def append_proposals(root: Path, ep_id: str, proposals: list[str]) -> int:
     p = root / "memory" / "PROPOSALS.md"
     if not proposals or not p.exists():
         return 0
+    with locked(p) as held:
+        return write_proposals(root, p, ep_id, proposals) if held else 0
+
+
+def write_proposals(root: Path, p: Path, ep_id: str, proposals: list[str]) -> int:
     text = read(p)
     nums = [int(n) for n in re.findall(r"\bP-(\d{3,})\b", text)]
     nxt = max(nums, default=0) + 1
@@ -615,6 +666,14 @@ def bullets(items) -> str:
     return "\n".join(f"- {i}" for i in items) if items else "- —"
 
 
+def closed_when(p: Path) -> tuple[dt.datetime, str]:
+    """When an episode's session last ended — the latest of its closed_at and its closing headings. A name sorts a
+    day's sessions by their id, not by when they closed (review 2026-10-22 M3); it only breaks a tie here."""
+    text = read(p)
+    times = [t for t in map(parse_time, [fm_get(text, "closed_at"), *CLOSE_HEADING_RE.findall(text)]) if t]
+    return max(times, default=dt.datetime.min.replace(tzinfo=dt.timezone.utc)), p.name
+
+
 # ── commands ─────────────────────────────────────────────────────────────────
 def cmd_start(payload: dict) -> int:
     root = root_dir()
@@ -640,7 +699,7 @@ def cmd_start(payload: dict) -> int:
     tasks = extract_block(read(todo), "todo-now") if todo.exists() else ""
     closed = [p for p in all_episodes(root) if f is None or p != f]
     closed = [p for p in closed if fm_get(read(p), "status") == "closed"]
-    last = closed[-1] if closed else None
+    last = max(closed, key=closed_when) if closed else None
     rec = reconcile_list(root)
     props = open_proposals(root)
     facts = [
@@ -728,6 +787,13 @@ def record_compact(root: Path, payload: dict, how: str, flag: str = "") -> int:
     if f:
         update_fields(f, compacts=n)
         summary = (payload.get("compact_summary") or "").strip() or "_(payload-ში compact_summary არ იყო)_"
+        # A model's retelling of the conversation: a key said in it, or a hidden character, does not reach the
+        # episode either (review 2026-10-22 M4)
+        summary, kinds = redact.redact(printable(summary))
+        if kinds:
+            flag += (f"> ⚠ compact-ის შეჯამებიდან ამოიშალა გასაღებ(ებ)ი ({', '.join(sorted(set(kinds)))}) — შეამოწმე "
+                     "წყარო და გაიარე როტაცია.\n\n")
+            log(f"compact #{n} for {sid8(sid)}: redacted {len(kinds)} secret(s) {sorted(set(kinds))}")
         append(f, f"\n## compact #{n} ({payload.get('trigger') or 'auto'}) — {iso()}\n\n{flag}{summary}\n")
     log(f"compact #{n} for {sid8(sid)} → {f} ({how}); payload keys: {','.join(sorted(payload))}")
     return 0
@@ -922,9 +988,12 @@ def distribute(root: Path, f: Path, ep_text: str, so: dict, scope: str, read_by_
     if not fm_get(ep_text, "closed_by"):
         fields["closed_by"] = "auto"
     update_fields(f, **fields)
-    upsert_progress_entry(root, f.stem, render_progress_entry(ep_text, f.stem, so))
+    written = upsert_progress_entry(root, f.stem, render_progress_entry(ep_text, f.stem, so))
+    if not written:
+        append(f, "\n> ⚠ `progress.md`-ის ჟურნალში ჩანაწერი ვერ ჩაიწერა (მიზეზი — episodic.log-ში); `/session-close` "
+                  "შეაჯერებს.\n")
     n = append_proposals(root, f.stem, [c.get("text") for c in so.get("proposals") or [] if c.get("verdict") == "new"])
-    log(f"summarize {f.stem}: ok ({scope}); progress entry written; {n} proposal(s) added")
+    log(f"summarize {f.stem}: ok ({scope}); progress entry {'written' if written else 'NOT written'}; {n} proposal(s) added")
 
 
 def summarize_episode(root: Path, f: Path, payload: dict) -> None:
@@ -933,11 +1002,15 @@ def summarize_episode(root: Path, f: Path, payload: dict) -> None:
     tp = payload.get("transcript_path") or fm_get(text, "transcript")
     closed_by = fm_get(text, "closed_by")
     closed_at = parse_time(fm_get(text, "closed_at")) if closed_by == "session-close" else None
+    # Another session's /session-close folded everything up to reconciled_at into progress.md: a session reopened after
+    # that is summarised from there on, and not at all when nothing was said since
+    reconciled_at = parse_time(fm_get(text, "reconciled_at"))
+    reconciled = bool(reconciled_at and (not closed_at or reconciled_at > closed_at))
     if not tp or not os.path.exists(tp):
         append(f, f"\n> ⚠ ავტო-შეჯამება გამოტოვდა: სესიის ჩანაწერი ვერ მოიძებნა (`{tp or '-'}`).\n")
         update_fields(f, needs_reconcile="true" if closed_by != "session-close" else "false")
         return
-    tr = read_transcript(tp, since=closed_at)
+    tr = read_transcript(tp, since=reconciled_at if reconciled else closed_at)
     if tr.version and fm_get(text, "claude_code") != tr.version:
         update_fields(f, claude_code=tr.version)
     if tr.size >= FORMAT_PROBE_BYTES and not tr.known:
@@ -952,12 +1025,19 @@ def summarize_episode(root: Path, f: Path, payload: dict) -> None:
         append(f, f"\n> {note}\n")
         update_fields(f, needs_reconcile="true")
         log(f"summarize {f.stem}: this engine's SessionStart hook — {tr.starts_ok} ran, {tr.starts_failed} failed")
-    if closed_at and tr.prompts_after <= 1:
-        log(f"summarize {f.stem}: closed by /session-close, {tr.prompts_after} prompt(s) after — no model call")
+    # A task asked after the mark is summarised — one prompt is enough (review 2026-10-22 M2); a mere "thanks" is
+    # caught by the length check below
+    mark = (f"reconciled at {fm_get(text, 'reconciled_at')}" if reconciled else "closed by /session-close" if closed_at
+            else "")
+    if mark and not tr.prompts_after:
+        log(f"summarize {f.stem}: {mark}, no prompt after — no model call")
         return
     body, said = model_input(tr.messages)
     if len(body) < 300:
-        append(f, "\n> ავტო-შეჯამება არ დასჭირდა: სესია ძალიან მოკლე იყო.\n")
+        if mark:  # only what came after the mark was short, not the session
+            log(f"summarize {f.stem}: {mark}, {len(body)} characters after it — nothing to summarise")
+        else:
+            append(f, "\n> ავტო-შეჯამება არ დასჭირდა: სესია ძალიან მოკლე იყო.\n")
         return
     # The summarizer is a model too: a credential in the transcript is hidden before the call, not only in the reply
     # afterwards (review M7).
@@ -972,8 +1052,9 @@ def summarize_episode(root: Path, f: Path, payload: dict) -> None:
         update_fields(f, needs_reconcile="true")
         log(f"summarize {f.stem} FAILED: {why}")
         return
-    distribute(root, f, text, so, "ბოლო `/session-close`-ის შემდეგ" if closed_at else "მთელი სესია", (body, said), memory,
-               tr.version)
+    scope = ("ბოლო შეჯერების შემდეგ" if reconciled else "ბოლო `/session-close`-ის შემდეგ" if closed_at else
+             "მთელი სესია")
+    distribute(root, f, text, so, scope, (body, said), memory, tr.version)
 
 
 def hooks_note(tr: Transcript, payload: dict) -> str:

@@ -195,7 +195,7 @@ def text_of(obj) -> str:
 SECRET_KINDS = (
     "**/.env", "**/.env.*", "**/.envrc", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.jks", "**/id_rsa*",
     "**/id_ed25519*", "**/id_ecdsa*", "**/credentials*.json", "**/serviceAccountKey*.json", "**/secrets/**",
-    "**/.ssh/**", "**/.aws/**")
+    "**/.ssh/**", "**/.aws/**", "**/.npmrc", "**/.netrc", "**/_netrc", "**/.git-credentials", "**/.pgpass")
 
 
 def is_secret_path(rel: str) -> bool:
