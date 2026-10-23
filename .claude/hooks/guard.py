@@ -28,13 +28,16 @@ Blocks with exit 2 (the reason goes to stderr, which Claude sees):
         byte budget                   unscoped rules, skill and agent listings — tools/budget.py) grow past
                                       `max_bytes` of the budget gate; a shrinking edit always passes; raising
                                       `max_bytes` in tools/gates/gates.toml is the owner's (`/approve budget N`)
-  A file outside the project still gets S2, G6 and G1 (by its name); another name for the project folder
+    G8  git's own configuration       .git/config (a worktree's, a submodule's): core.hooksPath and include.path
+                                      live there — change it with `git config`, which asks the owner
+  A file outside the project still gets S2, G6, G8 and G1 (by its name); another name for the project folder
   (//localhost/c$/…, //127.0.0.1/c$/…, a //?/C:/… long path) is read as the project itself.
   Bash | PowerShell
     B1  approve.py / approvals.md in a command that is not read-only
     B2  skipping git hooks: --no-verify (and its abbreviation --no-veri…), `commit -n`,
         core.hooksPath override (-c, --config-env, GIT_CONFIG_* variables) or a config include that
-        can carry one (include.path, includeIf…); a shell write to the launcher's .git/engine-python
+        can carry one (include.path, includeIf…); a shell write to the launcher's .git/engine-python or to
+        git's own .git/config
     B3  force push: -f, --force, --force-with-lease, +refspec
     B2/B3 also refuse a word the shell makes up where git reads options — an expansion ($…, `…`, $(…)), a
         glob or brace list that starts the word, a PowerShell splat — in front of any subcommand and among
@@ -98,6 +101,11 @@ EP_INDEX = "memory/episodes/INDEX.md"
 # The launcher's note of the interpreter it found (.claude/hooks/py.sh): pointed at another program, every hook
 # would run that program instead of Python.
 ENGINE_PYTHON_NOTE = ".git/engine-python"
+# git's own configuration — the repository's, a worktree's, a submodule's: core.hooksPath and include.path live there,
+# so a hand-written line switches the commit checks off (review 2026-10-22 H3). As a path an edit names, and inside a
+# shell command.
+GIT_CONFIG_RE = re.compile(r"(?:^|/)\.git/(?:[^/]+/)*config(?:\.worktree)?$", re.IGNORECASE)
+GIT_CONFIG_IN_CMD_RE = re.compile(r"\.git[\\/]+(?:[\w.-]+[\\/]+)*config(?:\.worktree)?(?![\w.-])", re.IGNORECASE)
 FOREIGN_EPISODE_MUTABLE = {"needs_reconcile", "reconciled_at", "reconciled_by"}
 CREATABLE = PENDING_STATUSES  # a new approvable document may only start in a "waiting for the owner" status
 # Secret-bearing paths. `.env.example` / `.sample` / `.template` are documentation, not secrets.
@@ -107,7 +115,7 @@ SECRET_RE = re.compile(
     r"|(?<![\w-])(?:secrets|\.ssh|\.aws)[\\/]"
     r"|\b(?:credentials|serviceAccountKey)[\w.-]*\.json\b"
     r"|\bid_(?:rsa|ed25519|ecdsa)\b"
-    r"|(?<![\w.-])\.(?:npmrc|netrc|git-credentials|pgpass)\b"  # tokens live here too, often in $HOME
+    r"|(?<![\w.-])(?:\.npmrc|\.netrc|_netrc|\.git-credentials|\.pgpass)\b"  # tokens live here too, often in $HOME
     r"|/proc/[^\s]*environ\b",  # a running program's environment, its API keys included (Linux; any depth)
     re.IGNORECASE)
 # Commands that can name a secret path without reading or staging its content.
@@ -324,6 +332,10 @@ def check_edit(tool: str, ti: dict, payload: dict, root: Path) -> int:
     if SECRET_RE.search(where) or (rel is None and SECRET_RE.search(path.replace("\\", "/"))):
         return block("G6", f"{where} საიდუმლოების ფაილია — აგენტი მას არ წერს და არ კითხულობს (ADR-0007). "
                            "ცვლადის სახელი და PLACEHOLDER ჩაწერე .env.example-ში; ნამდვილ მნიშვნელობას მფლობელი ჩასვამს.")
+    if GIT_CONFIG_RE.search(where):
+        return block("G8", f"{where} git-ის საკუთარი კონფიგურაციაა: core.hooksPath და include იქ ინახება, და ხელით "
+                           "ჩაწერილი ხაზი commit-ის შემოწმებებს თიშავს. პარამეტრი `git config`-ით შეცვალე — ის ჯერ "
+                           "მფლობელს ეკითხება.")
     low = where.lower()
     if low == LEDGER or (rel is None and low.endswith("/" + LEDGER)):
         return block("G1", f"{LEDGER} ჩაწერა მხოლოდ მფლობელის `/approve`-ით შეიძლება (tools/approve.py) — ამ "
@@ -1180,27 +1192,56 @@ PROTECTED_NAMES = (
     (Path(ENGINE_PYTHON_NOTE).name, "B2", f"`{ENGINE_PYTHON_NOTE}`-ს მხოლოდ `.claude/hooks/py.sh` წერს (ნაპოვნი Python-ის გზა): სხვა "
                             "პროგრამაზე მითითება ყველა hook-სა და კარიბჭეს Python-ის ნაცვლად იმ პროგრამით გაუშვებდა — "
                             "აკრძალულია."),
+    (GIT_CONFIG_IN_CMD_RE, "B2", "`.git/config`-ში core.hooksPath და include ინახება: shell-ით ჩაწერილი ხაზი commit-ის "
+                                 "შემოწმებებს თიშავს — აკრძალულია. პარამეტრი `git config`-ით შეცვალე, ის ჯერ მფლობელს "
+                                 "ეკითხება."),
 )
 
 
+# A redirection that writes a file (`> f`, `>> f`, `&> f`, `>| f`, `<> f`, `>& f`) — not a duplication like `2>&1`.
+WRITE_REDIRECTS = {">", ">>", "&>", "&>>", ">|", "<>"}
+# A name directly in memory/ — where the approval ledger lives — that the shell makes up ($…, `…`, a glob or a brace
+# list); a variable in front of memory/ (`$S/memory/episodes`) or a glob in a folder below it (episodes/*.md) is not one.
+MADE_UP_IN_MEMORY_RE = re.compile(r"(?:^|[\\/])memory[\\/][^\s\\/]*[$`*?\[{]", re.IGNORECASE)
+
+
+def redirect_targets(seg: list[str]) -> list[str]:
+    return [seg[i + 1] for i, t in enumerate(seg[:-1])
+            if t in WRITE_REDIRECTS or (t == ">&" and not seg[i + 1].isdigit() and seg[i + 1] != "-")]
+
+
+def read_only_command(seg: list[str], word: str, start: int) -> bool:
+    if word == "sed":  # in-place (-i, clustered -Ei, --in-place) or a w/W command writes the file (review S8)
+        inplace = any(re.match(r"-[A-Za-z]*i", x) or x.startswith("--in-place") for x in seg)
+        wcmd = any(("w " in x or x.rstrip().endswith("w")) for x in seg if not x.startswith("-"))
+        return not (inplace or wcmd)
+    if word == "git":
+        sub, _, _ = git_subcommand(seg, start)
+        return sub in GIT_SAFE_SUBCMDS
+    if word in ("set-content", "add-content", "out-file", "tee", "tee-object"):
+        return False
+    if word in ("for", "select"):  # a loop's header runs nothing: its words are a list
+        return not any(">" in t for t in seg)
+    return word in READ_ONLY_CMDS and not any(">" in t for t in seg)
+
+
 def writes_protected(seg: list[str], word: str, start: int, extra: str = "") -> int:
-    """B1/B2: a command that is not read-only names the ledger, the approval script or the launcher's note."""
+    """B1/B2: a command that is not read-only names the ledger, the approval script, the launcher's note or git's own
+    configuration — or a read-only one redirects its output into one of them (`git show … > memory/approvals.md`).
+    B1 also refuses a file in memory/ whose name the shell makes up (`memory/${v}als.md`, `memory/appro*.md`): the
+    guard cannot see whether it is the ledger (review 2026-10-22 M5)."""
     joined = (" ".join(seg) + " " + extra).lower()  # extra: the segment's $(…) bodies (review S1)
+    targets = " ".join(redirect_targets(seg)).lower()
     for name, code, why in PROTECTED_NAMES:
-        if name not in joined:
+        if not (name.search(joined) if isinstance(name, re.Pattern) else name in joined):
             continue
-        read_only = word in READ_ONLY_CMDS and not any(">" in t for t in seg)
-        if word == "sed":  # in-place (-i, clustered -Ei, --in-place) or a w/W command writes the file (review S8)
-            inplace = any(re.match(r"-[A-Za-z]*i", x) or x.startswith("--in-place") for x in seg)
-            wcmd = any(("w " in x or x.rstrip().endswith("w")) for x in seg if not x.startswith("-"))
-            read_only = not (inplace or wcmd)
-        if word == "git":
-            sub, _, _ = git_subcommand(seg, start)
-            read_only = sub in GIT_SAFE_SUBCMDS
-        if word in ("set-content", "add-content", "out-file", "tee", "tee-object"):
-            read_only = False
-        if not read_only:
+        written = name.search(targets) if isinstance(name, re.Pattern) else name in targets
+        if written or not read_only_command(seg, word, start):
             return block(code, why)
+    made_up = [t for t in seg if MADE_UP_IN_MEMORY_RE.search(t)]
+    if made_up and (set(made_up) & set(redirect_targets(seg)) or not read_only_command(seg, word, start)):
+        return block("B1", f"`{made_up[0]}` — memory/-ში ფაილის სახელს shell-ი ქმნის ($…, `…`, glob), და guard ვერ ხედავს, "
+                           "დამტკიცებების ჟურნალი ხომ არ არის — აკრძალულია. ფაილის სახელი პირდაპირ ჩაწერე.")
     return 0
 
 
@@ -1220,9 +1261,9 @@ def check_heredoc_bodies(bodies: list[tuple[bool, str]], depth: int) -> int:
 
 
 def check_ps_env(cmd: str) -> int:
-    """PowerShell output cannot be redacted (sentinel R2), so a secret read in PowerShell is refused here, scanned
-    on the whole command — grouping parens would otherwise split `[Environment]::GetEnvironmentVariable('KEY')`
-    across segments (review S2/S13)."""
+    """A failed PowerShell call's output cannot be redacted (sentinel R2), so a secret read in PowerShell is refused
+    here, scanned on the whole command — grouping parens would otherwise split
+    `[Environment]::GetEnvironmentVariable('KEY')` across segments (review S2/S13)."""
     m = CODE_ENV_DUMP_RE.search(cmd) or PS_ENV_RE.search(cmd)
     if m:
         return env_block(m.group(0))

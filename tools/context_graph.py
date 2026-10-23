@@ -386,14 +386,21 @@ def _is_skipped_dir(rel_dir: str) -> bool:
     return any(rel_dir == s or rel_dir.startswith(s + "/") for s in SKIP_DIRS)
 
 
+def holds_typed_docs(rel_dir: str) -> bool:
+    """A folder the vault's typed documents live in or under (PATH_TYPES): docs/, docs/adr/, memory/…"""
+    return any(pattern.startswith(rel_dir + "/") for pattern, _ in PATH_TYPES)
+
+
 def code_folders(root: Path) -> tuple[str, ...]:
-    """Folders below the root that hold their own code project (CODE_MARKERS) — the product's, foreign here."""
+    """Folders below the root that hold their own code project (CODE_MARKERS) — the product's, foreign here. A marker
+    in a folder that holds typed documents makes no product of it: one docs/package.json would otherwise hide every
+    ADR and spec from the approval check (review 2026-10-22 H5)."""
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = Path(dirpath).relative_to(root).as_posix()
         rel_dir = "" if rel_dir == "." else rel_dir
         dirnames[:] = [d for d in dirnames if not _is_skipped_dir(f"{rel_dir}/{d}".lstrip("/"))]
-        if rel_dir and any(m in filenames for m in CODE_MARKERS):
+        if rel_dir and not holds_typed_docs(rel_dir) and any(m in filenames for m in CODE_MARKERS):
             out.append(rel_dir + "/")
             dirnames[:] = []  # everything below belongs to that project
     return tuple(out)

@@ -42,6 +42,16 @@
       "Read(**/*.pem)",
       "Read(**/*.key)",
       "Read(**/secrets/**)",
+      "Read(.npmrc)",
+      "Read(~/.npmrc)",
+      "Read(.netrc)",
+      "Read(~/.netrc)",
+      "Read(_netrc)",
+      "Read(~/_netrc)",
+      "Read(.git-credentials)",
+      "Read(~/.git-credentials)",
+      "Read(.pgpass)",
+      "Read(~/.pgpass)",
       "Bash(type *.env*)",
       "Bash(head *.env*)",
       "Bash(tail *.env*)",
@@ -124,6 +134,7 @@
       "Bash(git merge*)",
       "Bash(git rebase*)",
       "Bash(git reset*)",
+      "Bash(git commit *--am*)",
       "Bash(git restore*)",
       "Bash(git checkout -- *)",
       "Bash(git stash*)",
@@ -245,6 +256,18 @@
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "^(Bash|PowerShell|Read|Grep|WebFetch|WebSearch|mcp__.*)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py.sh\" .claude/hooks/sentinel.py post",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
       {
         "matcher": "^(Bash|PowerShell|Read|Grep|WebFetch|WebSearch|mcp__.*)$",
         "hooks": [

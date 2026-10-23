@@ -5,11 +5,14 @@
 Wired in .claude/settings.json through .claude/hooks/py.sh (hook JSON on stdin):
 
   PostToolUse (Bash|PowerShell|Read|Grep|WebFetch|WebSearch|mcp__*) -> sentinel.py post
-    R1  a credential in the output of Bash / Read / Grep is replaced by a redaction marker BEFORE the
-        model sees it (`updatedToolOutput`, Claude Code >= 2.1.241); an MCP tool's output the same way
-        (`updatedMCPToolOutput`). The model is told what was hidden and why — never the value.
-    R2  a credential in output Claude Code does not let a hook rewrite (WebFetch, WebSearch, PowerShell):
-        a warning not to repeat or store it, and to tell the owner so they can rotate it.
+    R1  a credential in a tool's output is replaced by a redaction marker BEFORE the model sees it
+        (`updatedToolOutput`, Claude Code >= 2.1.241 — every tool, in that tool's own output shape); an MCP
+        tool's output the same way (`updatedMCPToolOutput`). The model is told what was hidden and why —
+        never the value.
+  PostToolUseFailure (the same tools) -> sentinel.py post
+    R2  a credential in the output of a call that FAILED — a command that exited non-zero: Claude Code shows
+        its error text as it is and lets no hook replace it (hooks reference, 2026-10-22), so the model is
+        warned not to repeat or store it, and to tell the owner so they can rotate it.
     I1  instruction-like text in UNTRUSTED output — WebFetch, WebSearch, MCP; Read/Grep of a path outside the
         project or under research/, and a Grep of the whole project whose output names a research/ file; a
         shell command that fetches from the web or GitHub (a URL, curl, wget, gh issue/pr/api …) or reads
@@ -44,8 +47,6 @@ CODE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(CODE_ROOT / "tools"))
 import redact  # noqa: E402
 
-# Built-in tools whose result a PostToolUse hook may replace (Claude Code hooks reference, v2.1.241+).
-REWRITABLE = {"Bash", "Read", "Grep", "Glob", "Write", "Edit", "ListDirectory", "FindInFiles", "Terminal"}
 UNTRUSTED_TOOLS = {"WebFetch", "WebSearch"}
 FOREIGN = "research"  # the project's foreign folder (AGENTS.md): text there was written by someone else
 # A shell command whose output comes from outside: the web, or text other people wrote on GitHub.
@@ -118,18 +119,21 @@ def is_untrusted(tool: str, ti: dict, payload: dict, root: Path, text: str) -> b
 def cmd_post(payload: dict) -> int:
     tool = str(payload.get("tool_name") or "")
     ti = payload.get("tool_input") or {}
-    resp = payload.get("tool_response")
+    # A call that failed arrives as PostToolUseFailure, its output in `error` (a command: "Exit code N" and what it
+    # printed) — it reached the model as it was: only a note can follow it (review 2026-10-22 H1).
+    failed = payload.get("hook_event_name") == "PostToolUseFailure" or ("tool_response" not in payload and "error" in payload)
+    resp = payload.get("error") if failed else payload.get("tool_response")
     if resp is None:
         return 0
     root = root_dir()
     src = source_of(tool, ti)
     notes: list[str] = []
-    out: dict = {"hookEventName": "PostToolUse"}
+    out: dict = {"hookEventName": "PostToolUseFailure" if failed else "PostToolUse"}
 
     cleaned, kinds = redact.redact_obj(resp)
     if kinds:
         shown = ", ".join(sorted(set(kinds)))
-        if tool in REWRITABLE or tool.startswith("mcp__"):
+        if not failed:  # every tool's output may be replaced, in its own shape (review 2026-10-22 H7)
             out["updatedMCPToolOutput" if tool.startswith("mcp__") else "updatedToolOutput"] = cleaned
             notes.append(
                 f"SENTINEL[R1]: {len(kinds)} credential(s) ({shown}) were removed from this output before you saw it "
@@ -138,9 +142,9 @@ def cmd_post(payload: dict) -> int:
                 "owner in Georgian that a key was exposed there, so they can move it into .env and rotate it.")
         else:
             notes.append(
-                f"SENTINEL[R2]: this output ({src}) contains what looks like a credential ({shown}) that could not be "
-                "hidden from you. Do not repeat, store or copy it anywhere; tell the owner in Georgian that it appeared "
-                "there, so they can rotate it.")
+                f"SENTINEL[R2]: the output of this failed call ({src}) contains what looks like a credential ({shown}); "
+                "Claude Code lets no hook hide a failed call's output, so it reached you. Do not repeat, store or copy it "
+                "anywhere; tell the owner in Georgian that it appeared there, so they can rotate it.")
     text = redact.text_of(cleaned)
     hidden = redact.hidden_chars(text)
     if hidden:

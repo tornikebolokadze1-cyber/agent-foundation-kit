@@ -8,8 +8,9 @@ REVIEW.md says a finding counts only when it is located and evidenced; until now
   - a `file:line` (also `file:a-b`, `file#La-Lb`) names a file inside the project — relative, no `..`, no drive or
     `/` start, no hidden character — and lines that exist in it; a bare path names an existing file; a secret file
     (`.env`, `*.key`… — tools/redact.py's SECRET_KINDS) is refused without being opened;
-  - the evidence's first code quote of 12+ characters (between backticks) is really written within 3 lines of the
-    cited lines (whitespace ignored; `...` or `…` may stand for skipped text) — commands and payloads go after it;
+  - a finding that cites a file opens its evidence with a code quote of 12+ characters (between backticks), and the
+    quote is really written within 3 lines of the cited lines (whitespace ignored; `...` or `…` may stand for skipped
+    text) — commands and payloads go after it;
   - a location without a file names a document that exists: SPEC-/PLAN-/ADR-NNNN, and any AC-/REQ- in that
     document, or D-/P-/L-NNN in the task list, the proposals or the lessons;
   - an UNRESOLVED item carries no severity: it names a missing fact, it is not a finding;
@@ -61,6 +62,8 @@ PART_RE = re.compile(r"\b(?:AC|REQ)-\d{3}\b")
 ITEM_RE = re.compile(r"\b([DPL])-\d{3}\b")
 ITEM_FILES = {"D": "tasks/todo.md", "P": "memory/PROPOSALS.md", "L": "memory/LESSONS.md"}
 UNREAD = ("[no-file]", "[past-end]", "[outside]", "[secret]")  # a place never read: its quote is not looked for
+NO_QUOTE = (f"[no-quote] the evidence quotes no code — open it with the cited lines between backticks ({MIN_QUOTE}+ "
+            "characters), so a machine can find them there")
 
 
 @dataclass
@@ -208,6 +211,9 @@ def check_item(root: Path, it: Item) -> list[str]:
         return out + ["[hidden-char] an invisible character in the location or the quote"]
     if ABS_RE.search(where):
         return out + [f"[outside] {where[:80]}: an absolute path — cite it relative to the project root"]
+    # A finding in code is tied to that code by its quote; without one nothing a machine can check says the finding is
+    # about what is written there (review 2026-10-22 H6). A document id needs none: its id is what is checked.
+    unquoted = it.kind == "finding" and not quote
     locs = list(LOC_RE.finditer(where))
     if not locs:
         bare = where.split()[0].replace("\\", "/")
@@ -216,7 +222,7 @@ def check_item(root: Path, it: Item) -> list[str]:
             if not problem and quote and not quote_near(quote, (root / bare).read_text(
                     encoding="utf-8", errors="replace").splitlines(), 1, 10 ** 9):
                 problem = f"[quote-absent] the quote is not in {bare}"
-            return out + ([problem] if problem else [])
+            return out + ([problem] if problem else [NO_QUOTE] if unquoted else [])
         problem = check_doc_loc(root, where)
         return out + ([problem] if problem else [])
     found = False
@@ -225,8 +231,11 @@ def check_item(root: Path, it: Item) -> list[str]:
         if problem:
             out.append(problem)
         found = found or here
-    if quote and not found and not any(p.startswith(UNREAD) for p in out):
-        out.append(f"[quote-absent] `{' '.join(quote.split())[:60]}` is not within {NEAR} lines of {where}")
+    if not any(p.startswith(UNREAD) for p in out):
+        if quote and not found:
+            out.append(f"[quote-absent] `{' '.join(quote.split())[:60]}` is not within {NEAR} lines of {where}")
+        elif unquoted:
+            out.append(NO_QUOTE)
     return out
 
 

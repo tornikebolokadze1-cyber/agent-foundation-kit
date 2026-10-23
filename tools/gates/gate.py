@@ -3,7 +3,7 @@
 """Deterministic gate runner. The gates themselves are listed in tools/gates/gates.toml.
 
   bash .claude/hooks/py.sh tools/gates/gate.py                  every enabled gate, whole project
-  bash .claude/hooks/py.sh tools/gates/gate.py --pre-commit     gates marked pre_commit (secrets: staged files only)
+  bash .claude/hooks/py.sh tools/gates/gate.py --pre-commit     gates marked pre_commit, on what the commit records
   bash .claude/hooks/py.sh tools/gates/gate.py --files F [F…]   gates marked stop, restricted to these files
   bash .claude/hooks/py.sh tools/gates/gate.py --only graph,json
   bash .claude/hooks/py.sh tools/gates/gate.py --list
@@ -12,6 +12,11 @@ Exit 0 = every enabled gate passed · 1 = at least one FAILED · 2 = INCONCLUSIV
 could not run, or checked zero files). SKIP (switched off) is reported and is not a pass.
 Every result line names the input it actually used, so a gate that quietly checked
 nothing cannot look green (ADR-0006: no evidence is not a pass).
+
+At commit (--pre-commit) a gate that reads files reads the staged text — the next commit's tree, exported from the
+git index — never the working copy; the secrets gate reads the staged files itself. A gate that runs the working
+copy's code (a `cmd` gate, the drill) is INCONCLUSIVE when a staged file changed again after `git add`. Known limit: a
+file changed on disk but not staged at all still reaches a `cmd` gate as it is on disk.
 """
 from __future__ import annotations
 
@@ -23,6 +28,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -182,7 +188,7 @@ def find_bash() -> str | None:
     return None
 
 
-def gate_shell(root: Path, files: list[Path], **_) -> Result:
+def gate_shell(root: Path, files: list[Path], repo: Path | None = None, **_) -> Result:
     todo = [p for p in pick(files, {".sh"}) if owned(root, p)]
     if not todo:
         return Result("shell", "PASS", "0 shell script(s) in scope")
@@ -200,7 +206,7 @@ def gate_shell(root: Path, files: list[Path], **_) -> Result:
     stored = []  # (mode, name) for each hook git has in its index; an untracked one has no stored mode yet
     if hooks:
         try:
-            r = subprocess.run(["git", "-C", str(root), "ls-files", "-s", "--", *hooks], capture_output=True,
+            r = subprocess.run(["git", "-C", str(repo or root), "ls-files", "-s", "--", *hooks], capture_output=True,
                                text=True, encoding="utf-8", errors="replace", timeout=30)
             why = "" if r.returncode == 0 else (r.stderr.strip() or f"exit {r.returncode}")[:160]
         except (OSError, subprocess.SubprocessError) as e:
@@ -423,7 +429,7 @@ def commit_exists(root: Path, sha: str) -> bool | None:
     return r.returncode == 0
 
 
-def gate_tasks(root: Path, files: list[Path], **_) -> Result:
+def gate_tasks(root: Path, files: list[Path], repo: Path | None = None, **_) -> Result:
     todo = sorted(p for p in (root / "tasks").glob("*.md") if p.name.lower() != "readme.md") if (root / "tasks").is_dir() else []
     if not todo:
         return Result("tasks", "INCONCLUSIVE", "no tasks/*.md file — the concrete task list is missing")
@@ -452,7 +458,7 @@ def gate_tasks(root: Path, files: list[Path], **_) -> Result:
                 bad.append(f"{where}: {tid} is ticked without a receipt — end the line with `✓ YYYY-MM-DD · <commit | მფლობელი | file>`")
                 continue
             for sha in SHA_RE.findall(done.group(2)):
-                ok = commit_exists(root, sha)
+                ok = commit_exists(repo or root, sha)
                 if ok is None:
                     return Result("tasks", "INCONCLUSIVE", f"git could not check commit {sha} cited by {tid} ({where})")
                 if not ok:
@@ -535,23 +541,118 @@ def load_gates() -> list[dict]:
     return tomllib.loads(path.read_text(encoding="utf-8"))["gate"]
 
 
+# At commit these read the next commit's tree (export_index); the secrets gate reads the staged files itself, and the
+# drill and the `cmd` gates run the working copy's code (changed_after_add).
+STAGED_READERS = {"graph", "json", "toml", "python", "shell", "eol", "instructions", "tasks", "budget"}
+STAGED_INPUT = "staged files (git index)"
+
+
+def reads_text(name: str) -> bool:
+    p = Path(name)
+    return p.suffix.lower() in TEXT_SUFFIXES or p.name in TEXT_NAMES or p.parent.name == ".githooks"
+
+
+def export_index(root: Path) -> tuple[Path | None, list[Path], str]:
+    """The next commit's tree in a temporary folder, so a gate run at commit judges what the commit records: a broken
+    file staged and then fixed on disk used to pass (review 2026-10-22 H4). A text file a gate reads holds its staged
+    bytes, with no line-ending conversion; any other file is created empty — a gate only checks that it exists (a link
+    to an image). (folder, its files, what went wrong — "" when nothing)."""
+    r = subprocess.run(["git", "-C", str(root), "ls-files", "-s", "-z"], capture_output=True, timeout=60)
+    if r.returncode != 0:
+        return None, [], "git could not list the staged files"
+    entries = []
+    for rec in filter(None, r.stdout.decode("utf-8", "replace").split("\0")):
+        meta, _, name = rec.partition("\t")  # "<mode> <sha> <stage>", then the path
+        parts = meta.split()
+        if len(parts) != 3 or not name or ".." in name.split("/"):
+            return None, [], f"git listed an index entry it could not use ({rec[:60]!r})"
+        if parts[2] != "0":
+            return None, [], f"{name} is not merged yet — finish the merge first"
+        if parts[0] != "160000":  # a submodule pointer: another repository's commit, no file here
+            entries.append((name, parts[1]))
+    texts = [(n, sha) for n, sha in entries if reads_text(n)]
+    r = subprocess.run(["git", "-C", str(root), "cat-file", "--batch"], input="".join(f"{sha}\n" for _, sha in texts).encode(),
+                       capture_output=True, timeout=300)
+    blobs, data, pos = {}, r.stdout, 0
+    for name, _ in texts if r.returncode == 0 else []:  # each: "<sha> blob <size>\n<content>\n"
+        nl = data.find(b"\n", pos)
+        head = data[pos:nl].split() if nl >= 0 else []
+        if len(head) != 3 or head[1] != b"blob":
+            break
+        blobs[name], pos = data[nl + 1:nl + 1 + int(head[2])], nl + 2 + int(head[2])
+    if len(blobs) != len(texts):
+        return None, [], "git could not read the staged files"
+    # one spelling: macOS's temporary folder is /var/… behind /private/var/…, a Windows runner's the short RUNNER~1, and
+    # every gate compares a resolved file with this root (L-025)
+    dest = Path(tempfile.mkdtemp(prefix="gate-staged-")).resolve()
+    for name, _ in entries:
+        (dest / name).parent.mkdir(parents=True, exist_ok=True)
+        (dest / name).write_bytes(blobs.get(name, b""))
+    return dest, [dest / n for n, _ in entries], ""
+
+
+def changed_after_add(root: Path) -> list[str] | None:
+    """Staged paths whose working copy is not what the commit records — changed again after `git add`, or taken out
+    of the commit while still on disk. None when git cannot tell."""
+    lists = []
+    for extra in ([], ["--cached"], ["--cached", "--diff-filter=D"]):
+        r = subprocess.run(["git", "-C", str(root), "diff", *extra, "--name-only", "--no-renames", "-z"],
+                           capture_output=True, timeout=60)
+        if r.returncode != 0:
+            return None
+        lists.append(set(filter(None, r.stdout.decode("utf-8", "replace").split("\0"))))
+    later, staged, removed = lists
+    return sorted(n for n in staged if n in later or (n in removed and (root / n).exists()))
+
+
+def ran_on_other_text(g: dict, later: list[str] | None) -> Result | None:
+    """The drill and a `cmd` gate run the working copy's code: when a staged file differs from it, their verdict is
+    not about the commit."""
+    if later is None:
+        return Result(g["id"], "INCONCLUSIVE", "git could not tell whether a staged file changed after `git add` — "
+                      "nothing was run")
+    hit = [n for n in later if g.get("builtin") != "drill" or n.startswith(HARNESS_PREFIXES)]
+    if not hit:
+        return None
+    return Result(g["id"], "INCONCLUSIVE", f"{len(hit)} staged file(s) changed after `git add` ({', '.join(hit[:3])}) — "
+                  "this would run the working copy, not what the commit records: `git add` them again, then commit",
+                  hit[:10])
+
+
 def run(root: Path, gates: list[dict], files: list[Path] | None, pre_commit: bool) -> list[Result]:
     results = []
     all_files, source = (files, "given files") if files is not None else project_files(root)
-    for g in gates:
-        if not g.get("enabled"):
-            results.append(Result(g["id"], "SKIP", f"level {g['level']} — {g.get('reason', 'switched off')}"))
-            continue
-        try:
-            if "builtin" in g:
-                fn = BUILTINS[g["builtin"]]
-                res = fn(root, files if g["builtin"] == "graph" else all_files, pre_commit=pre_commit, gate=g)
-            else:
-                res = run_cmd_gate(root, g)
-        except Exception as e:
-            res = Result(g["id"], "INCONCLUSIVE", f"gate crashed: {type(e).__name__}: {e}")
-        res.summary += f"  [input: {source}]" if g.get("builtin") not in ("graph", "drill", "tasks", "budget", None) else ""
-        results.append(res)
+    on = [g for g in gates if g.get("enabled")]
+    at_commit = pre_commit and files is None
+    staged, staged_files, why = (export_index(root) if at_commit and any(g.get("builtin") in STAGED_READERS for g in on)
+                                 else (None, [], ""))
+    later = changed_after_add(root) if at_commit and any(g.get("builtin") in ("drill", None) for g in on) else []
+    try:
+        for g in gates:
+            if not g.get("enabled"):
+                results.append(Result(g["id"], "SKIP", f"level {g['level']} — {g.get('reason', 'switched off')}"))
+                continue
+            builtin, label = g.get("builtin"), source
+            try:
+                if at_commit and builtin in STAGED_READERS:
+                    label = STAGED_INPUT
+                    res = (BUILTINS[builtin](staged, staged_files, pre_commit=True, gate=g, repo=root) if staged
+                           else Result(g["id"], "INCONCLUSIVE", f"{why} — nothing the commit records was checked"))
+                elif at_commit and builtin in ("drill", None) and (other := ran_on_other_text(g, later)):
+                    res = other
+                elif builtin:
+                    fn = BUILTINS[builtin]
+                    res = fn(root, files if builtin == "graph" else all_files, pre_commit=pre_commit, gate=g)
+                else:
+                    res = run_cmd_gate(root, g)
+            except Exception as e:
+                res = Result(g["id"], "INCONCLUSIVE", f"gate crashed: {type(e).__name__}: {e}")
+            named = label == STAGED_INPUT or builtin not in ("graph", "drill", "tasks", "budget", None)
+            res.summary += f"  [input: {label}]" if named else ""
+            results.append(res)
+    finally:
+        if staged:
+            shutil.rmtree(staged, ignore_errors=True)
     return results
 
 
