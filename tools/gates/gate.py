@@ -582,7 +582,9 @@ def export_index(root: Path) -> tuple[Path | None, list[Path], str]:
         blobs[name], pos = data[nl + 1:nl + 1 + int(head[2])], nl + 2 + int(head[2])
     if len(blobs) != len(texts):
         return None, [], "git could not read the staged files"
-    dest = Path(tempfile.mkdtemp(prefix="gate-staged-"))
+    # one spelling: macOS's temporary folder is /var/… behind /private/var/…, a Windows runner's the short RUNNER~1, and
+    # every gate compares a resolved file with this root (L-025)
+    dest = Path(tempfile.mkdtemp(prefix="gate-staged-")).resolve()
     for name, _ in entries:
         (dest / name).parent.mkdir(parents=True, exist_ok=True)
         (dest / name).write_bytes(blobs.get(name, b""))

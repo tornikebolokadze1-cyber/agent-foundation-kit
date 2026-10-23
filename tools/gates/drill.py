@@ -2236,6 +2236,39 @@ def g_staged_reads(tmp: Path, v: Path) -> None:
     expect(rc == 2 and re.search(r"INCONCLUSIVE\s+drill", out) is not None and "tools/checker.py" in out, "seeded: a "
            "checker file changed again after `git add` → the drill (it runs the working copy) is INCONCLUSIVE, naming it",
            out[-240:])
+    # The staged copy lives in the temporary folder, which can have a second name: macOS's /var/… is /private/var/…, a
+    # Windows runner's TEMP the short RUNNER~1 — red in the kit's CI on both, green here and on Linux (L-025, 2026-10-23)
+    real_tmp, link_tmp = tmp / "staged-tmp-real", tmp / "staged-tmp-link"
+    real_tmp.mkdir()
+    try:  # a junction on Windows, a symlink elsewhere
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(str(real_tmp), str(link_tmp))
+        else:
+            os.symlink(real_tmp, link_tmp, target_is_directory=True)
+    except OSError as e:
+        record("INCONCL", f"gates: no folder link could be made here ({e}) — a staged copy whose folder has a second name "
+                          "is not drilled")
+        return
+    linked = {"TMPDIR": str(link_tmp), "TEMP": str(link_tmp), "TMP": str(link_tmp)}
+    s = fresh(tmp, "gates-staged-alias-graph", w)
+    write(s / "intent.md", (s / "intent.md").read_text(encoding="utf-8") + "[[no-such-note]]\n")
+    git(s, "add", "intent.md")
+    git(s, "rm", "-q", "--cached", "plan.md")
+    rc, out = at_commit(s, "graph", env=linked)
+    expect(rc == 1 and "LINK-BROKEN" in out, "seeded: the staged copy in a temporary folder reached by another name, a "
+           "broken link staged and a linked note taken out → graph FAIL, LINK-BROKEN", out[-240:])
+    s = fresh(tmp, "gates-staged-alias-hook", w)
+    write(s / ".githooks" / "pre-commit", "#!/usr/bin/env bash\nexit 0\n")
+    git(s, "add", "-A")
+    git(s, "update-index", "--chmod=+x", ".githooks/pre-commit")
+    rc, out = at_commit(s, "shell", env=linked)
+    expect(rc == 0 and "1 of 1 hook(s) checked" in out, "control: the same temporary folder by another name, a hook "
+           "stored as 100755 → shell PASS, its mode checked", out[-240:], kind="control")
+    git(s, "update-index", "--chmod=-x", ".githooks/pre-commit")
+    rc, out = at_commit(s, "shell", env=linked)
+    expect(rc == 1 and "stored in git as 100644" in out, "seeded: the same, a hook stored as 100644 → shell FAIL",
+           out[-240:])
 
 
 def g_left_out(tmp: Path, v: Path) -> None:
