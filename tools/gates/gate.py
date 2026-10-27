@@ -488,6 +488,10 @@ def gate_budget(root: Path, files: list[Path], gate: dict | None = None, **_) ->
 
 HARNESS_PREFIXES = (".claude/hooks/", ".claude/settings", ".githooks/", "tools/", "orchestration/run.py",
                     "orchestration/decide.py", "orchestration/config.toml", "orchestration/prompts/")
+DRILL_SCRIPT = HERE / "drill.py"
+# The limit only stops a drill that hangs, and a stopped drill is INCONCLUSIVE — never a pass. A full drill took 263–811 s
+# on a busy Windows machine and 115–188 s on CI (2026-10-23); 600 s stopped good commits there.
+DRILL_TIMEOUT_S = 1800
 
 
 def gate_drill(root: Path, files: list[Path], pre_commit: bool = False, **_) -> Result:
@@ -497,9 +501,12 @@ def gate_drill(root: Path, files: list[Path], pre_commit: bool = False, **_) -> 
         if not any(s.startswith(HARNESS_PREFIXES) for s in staged):
             return Result("drill", "SKIP", "no check, hook or gate file is staged — the drill runs when a checker changes "
                                            "(and on every full `gate.py` run)")
-    drill = HERE / "drill.py"
-    r = subprocess.run([sys.executable, str(drill)], capture_output=True, text=True, encoding="utf-8",
-                       errors="replace", cwd=str(root), timeout=600)
+    try:
+        r = subprocess.run([sys.executable, str(DRILL_SCRIPT)], capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", cwd=str(root), timeout=DRILL_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return Result("drill", "INCONCLUSIVE", f"the drill ran longer than {DRILL_TIMEOUT_S:,} s and was stopped — nothing "
+                      "was proved; run it on its own: bash .claude/hooks/py.sh tools/gates/drill.py")
     tail = [ln for ln in r.stdout.splitlines() if ln.startswith(("  DEAD", "  DEFECT", "  INCONCL"))]
     last = (r.stdout.strip().splitlines() or ["(no output)"])[-1]
     status = {0: "PASS", 1: "FAIL"}.get(r.returncode, "INCONCLUSIVE")

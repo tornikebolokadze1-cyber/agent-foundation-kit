@@ -82,6 +82,8 @@ import claude_cli  # noqa: E402 — which claude, and what a nested session may 
 from context_graph import parse_frontmatter, printable, set_field  # noqa: E402
 
 WORKING_LINES = 60            # cap per injected block
+BRIEF_CHARS = 9_000           # cap on the whole brief: Claude Code keeps a hook text over ~10,000 characters in a file
+                              # and shows the agent only its first ~2,000 (measured in transcripts 2026-10-26)
 TRANSCRIPT_CHARS = 60_000     # cap on transcript text handed to the summariser: its opening and its end
 HEAD_CHARS = 15_000           # of that, the opening — why the session began; the rest goes to its end
 MESSAGE_CHARS = 8_000         # one message longer than this keeps its start and its end
@@ -290,6 +292,39 @@ def clip(text: str, n: int) -> str:
     return "\n".join(lines[:n]) + (f"\n… (+{len(lines) - n} ხაზი)" if len(lines) > n else "")
 
 
+def fit(text: str, n: int, where: str) -> str:
+    """`text` in at most `n` characters: a longer one is cut at a line end when one is near, and names the file that
+    holds it whole."""
+    if len(text) <= n:
+        return text
+    note = f"\n… (მოჭრილია — სრული ტექსტი `{where}`-შია)"
+    room = max(0, n - len(note))
+    cut = text.rfind("\n", 0, room + 1)
+    return (text[:cut] if cut >= room * 0.6 else text[:room]) + note
+
+
+def fair_shares(sizes: list[int], budget: int) -> list[int]:
+    """Split `budget` among blocks of these sizes: a block smaller than an equal share keeps all of it, and what it
+    leaves goes to the larger ones."""
+    out, left = [0] * len(sizes), max(0, budget)
+    for k, i in enumerate(sorted(range(len(sizes)), key=sizes.__getitem__)):
+        out[i] = min(sizes[i], left // (len(sizes) - k))
+        left -= out[i]
+    return out
+
+
+def compose_brief(source: str, facts: list[str], blocks: list[tuple[str, str, str]]) -> str:
+    """The brief in at most BRIEF_CHARS: the session's facts first and whole (they carry the ↻3 warning), then each
+    (title, file, text) block in its share of the rest."""
+    out = f"## სამუშაო მეხსიერება (SessionStart:{source})\n\n### სესიის ფაქტები\n\n" + "\n".join(facts)
+    heads = [f"\n\n### {title} — `{where}`\n\n" for title, where, _ in blocks]
+    texts = [clip(text, WORKING_LINES) or "_ბლოკი ცარიელია ან აკლია_" for _, _, text in blocks]
+    room = BRIEF_CHARS - len(out) - sum(map(len, heads))
+    for head, text, n, (_, where, _) in zip(heads, texts, fair_shares([len(t) for t in texts], room), blocks):
+        out += head + fit(text, n, where)
+    return out
+
+
 # ── episodes ─────────────────────────────────────────────────────────────────
 def episodes_dir(root: Path) -> Path:
     return root / "memory" / "episodes"
@@ -404,6 +439,7 @@ class Transcript:
     gbrain's per-file diagnostics) — so a changed format or a session without this engine's hooks is not silent."""
     messages: list[tuple[str, str]] = field(default_factory=list)  # (user/assistant/summary, text) after `since`
     prompts_after: int = 0
+    prompts_newer: int = 0  # of those, the ones after `newer` (the episode's last summary)
     size: int = 0
     lines: int = 0
     known: int = 0          # lines in the shape this reader understands: a user or assistant message with content
@@ -413,7 +449,7 @@ class Transcript:
     start_error: str = ""
 
 
-def read_transcript(path: str, since: dt.datetime | None = None) -> Transcript:
+def read_transcript(path: str, since: dt.datetime | None = None, newer: dt.datetime | None = None) -> Transcript:
     t = Transcript(size=os.path.getsize(path))
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -448,6 +484,7 @@ def read_transcript(path: str, since: dt.datetime | None = None) -> Transcript:
             # decision is checked against, never a prompt after /session-close (review C1)
             role = "summary" if o.get("isCompactSummary") else o["type"]
             t.prompts_after += role == "user"
+            t.prompts_newer += role == "user" and not (newer and ts and ts <= newer)
             t.messages.append((role, "\n".join(texts)))
     return t
 
@@ -715,13 +752,8 @@ def cmd_start(payload: dict) -> int:
     if compacts >= 3:
         facts.append(f"- ⚠ {compacts} compact ამ სესიაში — შეჯამების შეჯამება აღარ არის სანდო მეხსიერება. "
                      "ურჩიე მფლობელს: `/session-close`, მერე ახალი ტერმინალი ან `/clear`.")
-    ctx = (
-        f"## სამუშაო მეხსიერება (SessionStart:{source})\n\n"
-        f"### ახლა — `progress.md`\n\n{clip(state, WORKING_LINES) or '_ბლოკი ცარიელია ან აკლია_'}\n\n"
-        f"### მიმდინარე ფაზა — `plan.md`\n\n{clip(phase, WORKING_LINES) or '_ბლოკი ცარიელია ან აკლია_'}\n\n"
-        f"### დავალებები — `tasks/todo.md`\n\n{clip(tasks, WORKING_LINES) or '_ბლოკი ცარიელია ან აკლია_'}\n\n"
-        "### სესიის ფაქტები\n\n" + "\n".join(facts)
-    )
+    ctx = compose_brief(source, facts, [("ახლა", "progress.md", state), ("მიმდინარე ფაზა", "plan.md", phase),
+                                        ("დავალებები", "tasks/todo.md", tasks)])
     # The blocks and titles are text from files; a control or hidden character in them reaches the model as is
     # unless it is taken out here (review M7).
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": printable(ctx)}},
@@ -982,7 +1014,7 @@ def distribute(root: Path, f: Path, ep_text: str, so: dict, scope: str, read_by_
     append(f, render_summary(so, scope, version))
     if scrub_notes:
         append(f, "\n" + "\n".join(f"> {n}" for n in scrub_notes) + "\n")
-    fields = {"needs_reconcile": "true"}
+    fields = {"needs_reconcile": "true", "summarized_at": iso()}
     if not fm_get(ep_text, "title"):
         fields["title"] = so.get("title")
     if not fm_get(ep_text, "closed_by"):
@@ -1010,7 +1042,8 @@ def summarize_episode(root: Path, f: Path, payload: dict) -> None:
         append(f, f"\n> ⚠ ავტო-შეჯამება გამოტოვდა: სესიის ჩანაწერი ვერ მოიძებნა (`{tp or '-'}`).\n")
         update_fields(f, needs_reconcile="true" if closed_by != "session-close" else "false")
         return
-    tr = read_transcript(tp, since=reconciled_at if reconciled else closed_at)
+    summarized_at = parse_time(fm_get(text, "summarized_at"))
+    tr = read_transcript(tp, since=reconciled_at if reconciled else closed_at, newer=summarized_at)
     if tr.version and fm_get(text, "claude_code") != tr.version:
         update_fields(f, claude_code=tr.version)
     if tr.size >= FORMAT_PROBE_BYTES and not tr.known:
@@ -1031,6 +1064,11 @@ def summarize_episode(root: Path, f: Path, payload: dict) -> None:
             else "")
     if mark and not tr.prompts_after:
         log(f"summarize {f.stem}: {mark}, no prompt after — no model call")
+        return
+    # VS Code reopens and closes old sessions with nothing said (L-010): each close summarised one of them again, the
+    # same text up to four times (2026-10-23). A summary that already covers every prompt is not made again.
+    if summarized_at and not tr.prompts_newer:
+        log(f"summarize {f.stem}: summarised at {fm_get(text, 'summarized_at')}, no prompt since — no model call")
         return
     body, said = model_input(tr.messages)
     if len(body) < 300:
@@ -1156,33 +1194,42 @@ def catchup(root: Path, current_sid: str, transcript_dir: Path | None) -> list[s
     without this engine's hooks (L-020), so it is summarised and reconciled like any other."""
     hours = float(os.environ.get("EPISODIC_CATCHUP_HOURS") or 6)
     started = []
+    # Windows refuses to delete or replace a file another process has open — the detached summarizer rebuilding the
+    # index, say. One episode's refusal used to end this start with no working memory (2026-10-23); now it is logged and
+    # left as it is, so the next start tries it again.
     for p in all_episodes(root):
         if len(started) >= MAX_CATCHUPS_PER_START:
             break
-        text = read(p)
-        if fm_get(text, "status") != "open" or (current_sid and p.stem.endswith(sid8(current_sid))):
-            continue
-        idle_h = (now().timestamp() - p.stat().st_mtime) / 3600
-        tp = fm_get(text, "transcript")
-        if idle_h < hours or not tp:
-            continue
-        if empty_session(text, tp):
-            remove_empty_stub(root, p, "catch-up")
-            continue
-        if hand_to_summarizer(root, p, f"{idle_h:.0f}სთ უმოქმედოდ, სესია არ დაიხურა ნორმალურად",
-                              {"session_id": fm_get(text, "session"), "transcript_path": tp}):
-            started.append(p.stem)
+        try:
+            text = read(p)
+            if fm_get(text, "status") != "open" or (current_sid and p.stem.endswith(sid8(current_sid))):
+                continue
+            idle_h = (now().timestamp() - p.stat().st_mtime) / 3600
+            tp = fm_get(text, "transcript")
+            if idle_h < hours or not tp:
+                continue
+            if empty_session(text, tp):
+                remove_empty_stub(root, p, "catch-up")
+                continue
+            if hand_to_summarizer(root, p, f"{idle_h:.0f}სთ უმოქმედოდ, სესია არ დაიხურა ნორმალურად",
+                                  {"session_id": fm_get(text, "session"), "transcript_path": tp}):
+                started.append(p.stem)
+        except OSError as e:
+            log(f"catch-up {p.name} skipped: {type(e).__name__}: {e}")
     for tp, ep in hookless(root, transcript_dir, hours):
         if len(started) >= MAX_CATCHUPS_PER_START:
             break
-        payload = {"session_id": tp.stem, "transcript_path": tp.as_posix()}
-        f = ep or ensure_episode(root, payload, "catch-up", dt.date.fromtimestamp(tp.stat().st_mtime))
-        if f is None:
-            continue
-        went_on = "ეპიზოდის გარეშე" if ep is None else "ეპიზოდის დახურვის შემდეგ"
-        if hand_to_summarizer(root, f, f"ჩანაწერი {went_on} გაგრძელდა — ძრავის SessionStart-ის გარეშე; შემოწმება "
-                              "ჩანაწერში", {**payload, "hookless": ep is None}, needs_reconcile="true"):
-            started.append(f.stem)
+        try:
+            payload = {"session_id": tp.stem, "transcript_path": tp.as_posix()}
+            f = ep or ensure_episode(root, payload, "catch-up", dt.date.fromtimestamp(tp.stat().st_mtime))
+            if f is None:
+                continue
+            went_on = "ეპიზოდის გარეშე" if ep is None else "ეპიზოდის დახურვის შემდეგ"
+            if hand_to_summarizer(root, f, f"ჩანაწერი {went_on} გაგრძელდა — ძრავის SessionStart-ის გარეშე; შემოწმება "
+                                  "ჩანაწერში", {**payload, "hookless": ep is None}, needs_reconcile="true"):
+                started.append(f.stem)
+        except OSError as e:
+            log(f"catch-up {tp.name} skipped: {type(e).__name__}: {e}")
     return started
 
 

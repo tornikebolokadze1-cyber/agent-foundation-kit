@@ -37,8 +37,12 @@ argument-hint: "[what changed, or the owner's new answers]"
    **minor** (a sensible builder could settle it without changing what gets built — decide it yourself and mark it
    **ჰიპოთეზა**); **theirs** (only the person can answer it, and the answer changes what gets built). Ask the
    person's pile in one message, most important first, at most three questions, each with its options and your
-   recommendation — the one exception to one question per message, because it is the last round. When you offer
-   `/approve intent`, name in a sentence or two the calls you made yourself, so the person can check them.
+   recommendation — the one exception to one question per message, because it is the last round. Write the
+   person's pile into §7 as its open questions, so the stage stays at the interview until they are answered, and
+   write the check into the history (step 6) as `- <version> — <date> — მშენებლის შემოწმება: <N> კითხვა — <a> უკვე
+   ნაპასუხები, <b> თავად გადავწყვიტე (ჰიპოთეზა), <c> ადამიანს ვკითხე`: until that line is there, the stage block
+   names only the check and never `/approve intent`. When you offer `/approve intent`, name in a sentence or
+   two the calls you made yourself, so the person can check them.
 5. **Keep the fixed structure** (§1 ხედვა … §8 წყაროები + ცვლილებების ისტორია). Goals keep stable IDs
    (G1, G2…) — never renumber; retire one with ~~strike-through~~ and the reason. Every goal has
    "how we measure". Every item names its source: **მფლობელი** (the owner said it — with the date) or
