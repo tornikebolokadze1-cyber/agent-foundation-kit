@@ -278,6 +278,10 @@ def read_file(r: Report, path: Path, root: Path, sub: bool) -> None:
                     r.calls.append(calls[key])
                     compacted = fallback = restarted = False
                 calls[key].update(msg["usage"])
+                diag = msg.get("diagnostics")
+                miss = diag.get("cache_miss_reason") if isinstance(diag, dict) else None
+                if isinstance(miss, dict) and miss.get("type"):
+                    calls[key].miss = str(miss["type"])  # the transcript's own cache-miss reason
             for c in msg.get("content") or []:
                 if isinstance(c, dict) and c.get("type") == "tool_use":
                     on_tool_use(r, str(c.get("name") or "?"), c.get("input") or {}, root, sub)

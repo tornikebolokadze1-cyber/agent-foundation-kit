@@ -886,12 +886,32 @@ def idea_written(path: Path) -> bool:
     return any(ln.strip() and not PLACEHOLDER_RE.match(ln.strip()) for ln in m.group(1).splitlines())
 
 
+QUESTION_RE = re.compile(r"^\s*(?:\d+[.)]|[-*+])\s+\S")  # a list item in §7: an interview question still open
+BUILDER_CHECKED = "მშენებლის შემოწმება"  # what /intent writes into the history once the builder check has run
+
+
+def interview_state(path: Path) -> str:
+    """Where intent.md's interview stands (D-083): "open" while §7 holds a question — or the file has no §7, a hand-made
+    intent —, "check" once §7 is empty and the history has no builder-check line, "done" once it has one."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "open"
+    q = re.search(r"^## 7\b[^\n]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+    if not q or any(QUESTION_RE.match(ln) for ln in q.group(1).splitlines()):
+        return "open"
+    h = re.search(r"^## ცვლილებების ისტორია[^\n]*\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+    return "done" if h and BUILDER_CHECKED in h.group(1) else "check"
+
+
 def pending(g: Graph, engine: bool = False) -> list[Node]:
     """Documents waiting for the owner's /approve: the project's own, or (engine=True) the engine's ADRs. An intent
-    whose §1 is still the template is not offered — there is nothing in it to approve yet."""
+    whose §1 is still the template is not offered — there is nothing in it to approve yet —, nor one whose interview
+    is over while its builder check has not run (D-083)."""
     out = [n for n in g.nodes.values() if not n.foreign and n.type in PENDING_STATUSES
            and n.status in PENDING_STATUSES[n.type] and is_engine(n) == engine
-           and not (n.type == "intent" and not idea_written(g.root / n.path))]
+           and not (n.type == "intent" and (not idea_written(g.root / n.path)
+                                            or interview_state(g.root / n.path) == "check"))]
     order = {"intent": 0, "spec": 1, "plan": 2, "adr": 3}
     return sorted(out, key=lambda n: (order.get(n.type, 9), n.id))
 
@@ -998,12 +1018,28 @@ def project_stage(g: Graph) -> Stage:
                                "და frontmatter-ში ტიპი (`kind:` website / game / agent / automation / other), მერე ინტერვიუ, "
                                "ერთი კითხვა ერთ ჯერზე, `docs/guides/<kind>.md` §1-ით. setup-ს ნუ სთხოვ — ძრავა უკვე აწყობილია",
                          doc="intent.md")
+        interview = interview_state(g.root / intent.path)
+        if interview == "check":  # §7 is empty: one step only — the approval is not named until the check has run (D-083)
+            return Stage(1, short="მშენებლის შემოწმება", step="ინტერვიუ დასრულდა — ტექსტის შემოწმება ჯერ არ გაკეთებულა",
+                         person="დაელოდე — აგენტი `intent.md`-ს ცალკე აგენტს წააკითხებს, რომელსაც თქვენი საუბარი არ "
+                                "უნახავს, და გკითხავს მხოლოდ იმას, რაც მას ამ ტექსტით აშენებისას დააკლდებოდა",
+                         agent="ახლა მხოლოდ მშენებლის შემოწმება (`/intent`, ნაბიჯი 4; ტექსტი — "
+                               "`.claude/skills/intent/builder-check.md`): ერთი ახალი subagent `intent.md`-ს მარტო ტექსტით "
+                               "კითხულობს. მისი კითხვებიდან ის, რასაც ტექსტი ან საუბარი უკვე პასუხობს, ჩაწერე; წვრილმანი "
+                               "თავად გადაწყვიტე და **ჰიპოთეზად** მონიშნე; რასაც მხოლოდ ადამიანი უპასუხებს (მაქსიმუმ სამი), "
+                               "§7-ში ჩაწერე და ერთ შეტყობინებაში ჰკითხე; მერე `intent.md`-ის ცვლილებების ისტორიაში "
+                               f"ჩაწერე ხაზი „{BUILDER_CHECKED}: …“ — დამტკიცებას მანამდე ნუ შესთავაზებ",
+                         doc="intent.md")
+        if interview == "done":
+            return _review(1, intent, "ინტერვიუ და მისი შემოწმება დასრულდა — განზრახვა შენს დამტკიცებას ელოდება",
+                           "`/intent`")
         return Stage(1, short="ინტერვიუ", step="ინტერვიუ — განზრახვა იწერება",
                      person="უპასუხე კითხვებს; როცა intent.md შენს აზრს სწორად ასახავს — `/approve intent`",
                      agent=("" if intent.kind in KINDS else NEEDS_KIND)
                      + "გააგრძელე `/intent`-ის ინტერვიუ — ერთი კითხვა ერთ შეტყობინებაში, 2–3 ვარიანტითა და "
-                       "რეკომენდაციით; როცა ღია კითხვა აღარ დარჩება, გაუშვი მშენებლის შემოწმება (`/intent`, ნაბიჯი 4), "
-                       "მერე მოკლედ აჩვენე, რა ჩაიწერა, და შესთავაზე `/approve intent`"
+                       "რეკომენდაციით; როცა ღია კითხვა აღარ დარჩება, ჯერ მშენებლის შემოწმება (`/intent`, ნაბიჯი 4; "
+                       "ტექსტი — `.claude/skills/intent/builder-check.md`) და მისი ხაზი `intent.md`-ის ისტორიაში, მერე "
+                       "მოკლედ აჩვენე, რა ჩაიწერა, და შესთავაზე `/approve intent`"
                      + guide_note(g, "§1 — კითხვები (ისინი §7-ის შაბლონურ სიას ცვლის: §7-ში მხოლოდ ჯერ უპასუხო "
                                      "კითხვები დატოვე)"),
                      command="/approve intent", doc="intent.md")

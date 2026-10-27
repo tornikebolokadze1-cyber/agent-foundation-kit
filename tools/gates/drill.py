@@ -554,6 +554,31 @@ def g_graph_stage(tmp: Path, vault: Path) -> None:
         offered = "/approve adr 0001" in out
         expect(rc == 0 and want in out and detail in out and (engine not in edits or not offered),
                f"seeded: {label} → {want} ({detail})", out[:240])
+    # Found in live runs: an agent that answered the last interview question without /intent loaded skipped the builder check and
+    # offered the approval (2 of 2 live runs, 2026-10-23). With §7 empty, the stage names the check alone until the
+    # history holds its line — in the block, in the brief's approvals list and in the status line.
+    seven = "\n## 7. ღია კითხვები\n\n`/intent` აქედან იწყებს.\n\n{q}## ცვლილებების ისტორია\n\n- 0.1 — 2026-01-01 — ჩონჩხი\n{h}"
+    line_of = ("import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); import context_graph as cg; "
+               "print(cg.project_stage(cg.load(Path(sys.argv[2]))).status_line())")
+    checked = "- 0.2 — 2026-01-02 — მშენებლის შემოწმება: 5 კითხვა — 2 უკვე ნაპასუხები, 2 თავად გადავწყვიტე, 1 ადამიანს ვკითხე\n"
+    interview = "ინტერვიუ — განზრახვა იწერება"
+    for label, q, h, want, offered, kind in (
+            ("§7 still holds a question → the interview, the approval named", "1. Q1 — ვისთვის?\n\n", "", interview,
+             True, "control"),
+            ("§7 empty, no builder-check line in the history → the check alone, the approval named nowhere", "", "",
+             "ახლა მხოლოდ მშენებლის შემოწმება", False, "seeded"),
+            ("§7 empty, the check's line in the history → the approval offered", "", checked, "შენს დამტკიცებას ელოდება",
+             True, "seeded"),
+            ("the check ran and put its question for the person into §7 → still the interview until it is answered",
+             "1. Q8 — რამდენი ნაწარმია?\n\n", checked, interview, True, "seeded")):
+        v = fresh(tmp, f"stage-d083-{abs(hash(label))}", vault)
+        edit(v / intent, "[[ADR-0001-demo]].\n", "[[ADR-0001-demo]].\n" + seven.format(q=q, h=h))
+        out = py("tools/context_graph.py", "--root", str(v), "stage")[1]
+        brief = py("tools/context_graph.py", "--root", str(v), "brief", env={"EPISODIC_NESTED": None})[1]
+        line = check([PY, "-c", line_of, str(CODE / "tools"), str(v)])[1]
+        named = ["/approve intent" in text for text in (out, brief, line)]
+        expect(want in out and named == [offered] * 3, f"the interview's end: {label}",
+               f"named in block / brief / status line: {named}; {out[:200]}", kind=kind)
     v = fresh(tmp, "stage-no-spec", vault)
     edit(v / intent, *accepted[1:])
     for rel_ in (spec, plan):
@@ -1309,6 +1334,25 @@ def g_episodic(tmp: Path, vault: Path) -> None:
                     "source": "startup"}), env={**episode_env(w, state, stub_cmd, marker), "EPISODIC_AUTOSUMMARY": "0"})
     expect("DRILL-STATE" in out and "\\u001b" not in out and chr(0x202E) not in out,
            "M7: SessionStart injects the file blocks without control or hidden characters", out[:200])
+    expect("სრული ტექსტი `" not in out, "control: a short brief goes whole, no block cut", out[-300:], kind="control")
+    # Claude Code keeps a hook text over ~10,000 characters in a file and shows the agent ~2,000 of it
+    w = fresh(tmp, "episodic-long", vault)
+    long = "".join(f"- გრძელი ხაზი {i}: " + "ძალიან ბევრი ქართული ტექსტი " * 7 + "\n" for i in range(40))
+    for name, line in (("progress.md", "- ფაზა: DRILL-STATE-ქართული\n"), ("plan.md", "- [ ] თესტი\n"),
+                       ("tasks/todo.md", "- [ ] D-002 — DRILL-TODO-ქართული (owner) — verify: look\n")):
+        edit(w / name, line, line + long)
+    long_sid = "9a1e0086-0000-4000-8000-000000000086"
+    write(state / f"compacts-{long_sid}", "3")
+    rc, out, _ = py(".claude/hooks/episodic.py", "start", stdin=json.dumps({"session_id": long_sid, "source": "startup"}),
+                    env={**episode_env(w, state, stub_cmd, marker), "EPISODIC_AUTOSUMMARY": "0"})
+    ctx = json.loads(out).get("hookSpecificOutput", {}).get("additionalContext", "") if out.strip().startswith("{") else ""
+    expect(0 < len(ctx) <= 9_000, f"seeded: a brief of long blocks stays within its 9,000-character cap ({len(ctx):,})",
+           ctx[-200:])
+    expect("ეს სესია:" in ctx and "3 compact ამ სესიაში" in ctx and ctx.find("ეს სესია:") < ctx.find("### ახლა"),
+           "seeded: the session's facts and the ↻3 warning come first and whole", ctx[:300])
+    expect(all(s in ctx for s in ("DRILL-STATE", "DRILL-PHASE", "DRILL-TODO"))
+           and all(f"სრული ტექსტი `{n}`-შია" in ctx for n in ("progress.md", "plan.md", "tasks/todo.md")),
+           "seeded: each long block keeps its start and names the file that holds it whole", ctx[-300:])
     # The last closed session is the one that ended last; a name sorts a day's sessions by their id (review 2026-10-22 M3)
     w = fresh(tmp, "episodic-last-closed", vault)
 
@@ -1438,6 +1482,7 @@ def g_episodic(tmp: Path, vault: Path) -> None:
            f"{calls_after - calls_before}×")
     g_reconciled_resume(tmp, v, state, marker, ep_cmd)
     g_empty_sessions(tmp, v, ep_cmd)
+    g_catchup_refused(tmp, v, {**env, "EPISODIC_AUTOSUMMARY": "0"})
     g_find_claude(tmp)
     g_episodic_intake(tmp, vault, stub_cmd, marker)
     g_shared_writes(tmp, vault)
@@ -1636,6 +1681,36 @@ def g_episodic_intake(tmp: Path, vault: Path, stub_cmd: str, marker: Path) -> No
     expect(calls() == before and "არ დასჭირდა" not in ep, "control: only a short 'thanks' after /session-close → no "
            "model call, and no note that the session was short", f"model called {calls() - before}×; {ep[-160:]!r}",
            kind="control")
+    # Found in use (2026-10-23): VS Code reopened and closed old sessions with nothing said (L-010), and each close summarised them again —
+    # one session's same last part four times. A summary records when it was made; a prompt after it is what is new.
+    base = datetime.now().astimezone() - timedelta(minutes=30)
+    tp = make_transcript(tmp / "summarised-before.jsonl", base)  # six messages, one a minute from `base`
+
+    def summarised(sid: str, at: datetime, closed: datetime | None = None) -> None:
+        close = (f'closed_by: session-close\nclosed_at: "{closed.astimezone(timezone.utc):%Y-%m-%dT%H:%M:%SZ}"' if closed
+                 else 'closed_by: auto\nclosed_at: ""')
+        edit(closed_episode(v, sid, tp), 'closed_by: ""\nclosed_at: ""\nneeds_reconcile: false',
+             f'{close}\nneeds_reconcile: true\nsummarized_at: "{at.isoformat(timespec="seconds")}"')
+
+    for sid, at, closed, label in (
+            ("1a7a085a-0000-4000-8000-00000000085a", base + timedelta(minutes=10), None,
+             "an auto-closed session summarised after its last message, closed again with nothing said"),
+            ("1a7a085b-0000-4000-8000-00000000085b", base + timedelta(minutes=10), base + timedelta(minutes=2, seconds=30),
+             "a question after /session-close (message 4) that the last summary already covers")):
+        summarised(sid, at, closed)
+        before = calls()
+        ep = summarize(sid, tp, keep=True)
+        expect(calls() == before and "needs_reconcile: true" in ep and "DRILL-STUB-TITLE" not in ep,
+               f"seeded: {label} → no model call, nothing written again", f"model called {calls() - before}×")
+    sid = "1a7a085c-0000-4000-8000-00000000085c"
+    summarised(sid, base + timedelta(minutes=3, seconds=30))  # message 4, a prompt, comes after this summary
+    before = calls()
+    ep = summarize(sid, tp, keep=True)
+    expect(calls() > before and "DRILL-STUB-TITLE" in ep, "control: a prompt after the last summary → summarised again",
+           f"model called {calls() - before}×", kind="control")
+    stamp = re.search(r'(?m)^summarized_at: "?([^"\n]+)"?$', ep)
+    expect(stamp is not None and datetime.fromisoformat(stamp.group(1)) > base + timedelta(minutes=10),
+           "seeded: a summary records when it was made (summarized_at)", stamp.group(0) if stamp else "no summarized_at")
 
     # (a) the transcript explains itself
     def odd(p: Path, size: int) -> Path:  # a shape this reader does not know: what a format change would look like
@@ -1974,6 +2049,79 @@ def g_empty_sessions(tmp: Path, v: Path, ep_cmd) -> None:
     expect(not stub.exists(), "seeded: a 7 h idle empty stub is removed at the next SessionStart (catch-up)")
 
 
+def g_catchup_refused(tmp: Path, v: Path, env: dict) -> None:
+    """Found in use (2026-10-23): Windows refuses to delete a file another process has open. A catch-up that met one — an idle
+    empty stub while the detached summarizer rebuilt the index — ended SessionStart, and the session began with no
+    working memory. Now that episode is logged and left for the next start, and the start goes on."""
+    unwritten = tmp / "transcripts" / "never-written.jsonl"  # g_empty_sessions made its folder; the file never appears
+    hook, log_file = CODE / ".claude/hooks/episodic.py", tmp / "episodic-state" / "episodic.log"
+    sid = "1d1e0081-0000-4000-8000-000000000081"
+    stub = write(v / f"memory/episodes/EP-{TODAY}-{sid[:8]}.md", FM.format(
+        body=f'id: EP-{TODAY}-{sid[:8]}\ntype: episode\ntitle: ""\nsession: {sid}\ndate: {TODAY}\nstatus: open\n'
+             f'compacts: 0\ntranscript: "{unwritten.as_posix()}"\nclosed_by: ""\nclosed_at: ""\nneeds_reconcile: false\n')
+        + f"# EP-{TODAY}-{sid[:8]}\n\n## შეჯამება\n\n_ჯერ არ არის_\n")
+    old = time.time() - 7 * 3600
+    os.utime(stub, (old, old))
+
+    def start(n: int, cmd: list[str], refuse: str = "", tp: str = "") -> tuple[int, str, str]:
+        payload = {"session_id": f"fe55008{n}-0000-4000-8000-00000000008{n}", "source": "startup",
+                   **({"transcript_path": tp} if tp else {})}
+        rc, out, err = check(cmd, stdin=json.dumps(payload), env={**env, "DRILL_REFUSE": refuse})
+        try:
+            brief = json.loads(out).get("hookSpecificOutput", {}).get("additionalContext", "")
+        except ValueError:
+            brief = ""
+        return rc, brief, err
+
+    def logged(marker: str) -> int:
+        return (log_file.read_text(encoding="utf-8") if log_file.exists() else "").count(marker)
+
+    # everywhere: a delete or a replace refused the way Windows refuses it (a POSIX system deletes an open file)
+    refusing = [PY, str(write(tmp / "write-refused.py", (
+        "import os, pathlib, runpy, sys\n"
+        "name = os.environ['DRILL_REFUSE']\n"
+        "real_unlink, real_replace = pathlib.Path.unlink, os.replace\n"
+        "def unlink(self, missing_ok=False):\n"
+        "    if self.name.endswith(name):\n"
+        "        raise PermissionError(13, 'used by another process (drill)', str(self))\n"
+        "    return real_unlink(self, missing_ok=missing_ok)\n"
+        "def replace(src, dst, **kw):\n"
+        "    if pathlib.Path(dst).name.endswith(name):\n"
+        "        raise PermissionError(13, 'used by another process (drill)', str(dst))\n"
+        "    return real_replace(src, dst, **kw)\n"
+        "pathlib.Path.unlink, os.replace = unlink, replace\n"
+        "sys.argv = [sys.argv[1], 'start']\n"
+        "runpy.run_path(sys.argv[0], run_name='__main__')\n"))), str(hook)]
+    cases = [("whose delete is refused", lambda: start(1, refusing, refuse=stub.name))]
+    if os.name == "nt":  # and the real thing: another process holds the file open
+        def held() -> tuple[int, str, str]:
+            with stub.open(encoding="utf-8"):
+                return start(2, [PY, str(hook), "start"])
+        cases.append(("held open by another process", held))
+    for i, (label, attempt) in enumerate(cases, 1):
+        rc, brief, err = attempt()
+        expect(rc == 0 and "### სესიის ფაქტები" in brief and stub.exists()
+               and logged(f"catch-up {stub.name} skipped: PermissionError") == i,
+               f"seeded: an idle empty stub {label} → SessionStart still brings the working memory, the stub stays and "
+               "the log says why", f"rc={rc}, brief {len(brief)} characters, stub kept: {stub.exists()}; {err[-160:]}")
+    rc, brief, _ = start(3, [PY, str(hook), "start"])
+    expect(not stub.exists() and "### სესიის ფაქტები" in brief,
+           "control: with nothing in the way, the next start removes the stub", f"stub kept: {stub.exists()}",
+           kind="control")
+    # the second loop: a session that ran without this engine's hooks, whose new episode cannot be written
+    tdir = tmp / "transcripts-d081"
+    tdir.mkdir()
+    hookless = make_transcript(tdir / "b0810000-0000-4000-8000-000000000081.jsonl", datetime.now().astimezone()
+                               - timedelta(hours=7))
+    old = time.time() - 6.5 * 3600
+    os.utime(hookless, (old, old))
+    rc, brief, err = start(4, refusing, refuse="-b0810000.md", tp=str(tdir / "fe550084-this-session.jsonl"))
+    expect(rc == 0 and "### სესიის ფაქტები" in brief and logged(f"catch-up {hookless.name} skipped: PermissionError") == 1
+           and not list((v / "memory/episodes").glob("EP-*-b0810000.md")),
+           "seeded: a session that ran without this engine's hooks, whose episode cannot be written → SessionStart still "
+           "brings the working memory and the log says why", f"rc={rc}, brief {len(brief)} characters; {err[-160:]}")
+
+
 def g_find_claude(tmp: Path) -> None:
     """The real summarizer path (no EPISODIC_CLAUDE_BIN): a broken npm shim on PATH must not win over
     the native install — on Windows such a shim may only print "claude native binary not installed"."""
@@ -2158,6 +2306,7 @@ def g_gates(tmp: Path, vault: Path) -> None:
     g_cmd_gates(tmp, v)
     g_staged_reads(tmp, v)
     g_left_out(tmp, v)
+    g_drill_limit(tmp, v)
 
 
 def g_staged_reads(tmp: Path, v: Path) -> None:
@@ -2293,6 +2442,31 @@ def g_left_out(tmp: Path, v: Path) -> None:
     rc, out, err = check([PY, str(stub / "tools/gates/gate.py"), "--only", "drill", "--quiet"], env={"GATE_ROOT": str(v)})
     expect(rc == 0 and "LEFT OUT: decision" in out + err, "seeded: gate.py --quiet (the commit hook) still shows a drill "
            "line that names a left-out group", (out + err)[-200:])
+
+
+# gate.py with a stand-in drill and its own limit (seconds): the drill gate's run, nothing else changed
+WITH_DRILL = ("import sys, pathlib; sys.path.insert(0, sys.argv[1]); import gate; gate.DRILL_SCRIPT = pathlib.Path(sys.argv[2]); "
+              "gate.DRILL_TIMEOUT_S = int(sys.argv[3]); sys.exit(gate.main(['--only', 'drill']))")
+
+
+def g_drill_limit(tmp: Path, v: Path) -> None:
+    """The drill gate stops a drill that hangs and says nothing was proved; its limit leaves a busy machine room — a full
+    drill took up to 811 s on a busy machine, and 600 s stopped good commits (2026-10-23)."""
+    quick = write(tmp / "drill-quick.py", 'print("\\nARMED=1  DEAD/DEFECT=0  INCONCLUSIVE=0  (0s)")\n')
+    stuck = write(tmp / "drill-stuck.py", "import time\ntime.sleep(45)\n")
+    rc, out, err = check([PY, "-c", WITH_DRILL, str(CODE / "tools/gates"), str(quick), "30"], env={"GATE_ROOT": str(v)},
+                         timeout=60)
+    expect(rc == 0 and re.search(r"PASS\s+drill", out) is not None, "control: a drill that ends within its limit → "
+           "drill PASS", (out + err)[-200:], kind="control")
+    rc, out, err = check([PY, "-c", WITH_DRILL, str(CODE / "tools/gates"), str(stuck), "3"], env={"GATE_ROOT": str(v)},
+                         timeout=30)
+    expect(rc == 2 and re.search(r"INCONCLUSIVE\s+drill\s+the drill ran longer than 3 s", out) is not None,
+           "seeded: a drill that hangs → stopped at its limit, drill INCONCLUSIVE (exit 2), never a pass",
+           f"rc={rc} {(out + err)[-200:]}")
+    rc, out, err = check([PY, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import gate; print(gate.DRILL_TIMEOUT_S)",
+                          str(CODE / "tools/gates")])
+    expect(rc == 0 and out.strip().isdigit() and int(out.strip()) >= 1800, "the drill's limit at commit leaves a busy "
+           "machine room: at least 1800 s", (out + err).strip()[-120:])
 
 
 def g_engine_scan(tmp: Path, v: Path, token: str) -> None:
@@ -3748,9 +3922,11 @@ def usage_of(cw: int = 0, cr: int = 0, out: int = 0, ttl: str = "1h") -> dict:
                                "ephemeral_1h_input_tokens": cw if ttl == "1h" else 0}}
 
 
-def model_call(mid: str, ts: str, model: str = "claude-drill", sidechain: bool = False, **usage) -> str:
-    return transcript_line("assistant", ts, isSidechain=sidechain,
-                           message={"id": mid, "model": model, "content": [], "usage": usage_of(**usage)})
+def model_call(mid: str, ts: str, model: str = "claude-drill", sidechain: bool = False, miss: str = "", **usage) -> str:
+    message = {"id": mid, "model": model, "content": [], "usage": usage_of(**usage)}
+    if miss:  # the cache-miss reason a transcript gives for the call itself, in the shape measured 2026-10-26
+        message["diagnostics"] = {"cache_miss_reason": {"type": miss, "cache_missed_input_tokens": usage.get("cw", 0)}}
+    return transcript_line("assistant", ts, isSidechain=sidechain, message=message)
 
 
 def g_observe_cache(tmp: Path, tdir: Path, env: dict) -> None:
@@ -3818,6 +3994,35 @@ def g_observe_cache(tmp: Path, tdir: Path, env: dict) -> None:
     expect(c.get("rebuilds") == {"start": {"count": 1, "tokens": 60_000}, "ttl": {"count": 1, "tokens": 71_000}},
            "seeded: a restart marker whose own rewrite stayed small does not label a later pause's rebuild",
            str(c.get("rebuilds")))
+    # After a refusal the fallback model's first message carries the refused call's cache read, and the rewrite
+    # comes one call later — both times in this project's transcripts (2026-10-07, 2026-10-19), both named "unknown"
+    cases = {
+        "fa11ba00": ([model_call("f1", "2026-10-06T10:00:00Z", cw=100_000),
+                      transcript_line("system", "2026-10-06T10:01:00Z", subtype="model_refusal_fallback"),
+                      model_call("f2", "2026-10-06T10:01:10Z", model="claude-drill-b", cr=100_000, cw=500),
+                      model_call("f3", "2026-10-06T10:01:20Z", model="claude-drill-b", cr=30_000, cw=72_000)],
+                     {"start": {"count": 1, "tokens": 100_000}, "fallback": {"count": 1, "tokens": 70_500}},
+                     "seeded: a refusal fallback whose rewrite comes one call later is named a fallback, not "
+                     "'cause unknown'", "seeded"),
+        "7001c000": ([model_call("t1", "2026-10-06T10:00:00Z", cw=100_000),
+                      model_call("t2", "2026-10-06T10:01:00Z", cr=100_000, cw=1_000),
+                      model_call("t3", "2026-10-06T10:02:00Z", miss="tools_changed", cr=20_000, cw=82_000)],
+                     {"start": {"count": 1, "tokens": 100_000}, "tools": {"count": 1, "tokens": 81_000}},
+                     "seeded: a rewrite the transcript itself puts down to a changed tool list is named so", "seeded"),
+        "fa11ba01": ([model_call("p1", "2026-10-06T10:00:00Z", cw=100_000),
+                      transcript_line("system", "2026-10-06T10:01:00Z", subtype="model_refusal_fallback"),
+                      model_call("p2", "2026-10-06T10:01:10Z", miss="model_changed", cr=100_000, cw=500),
+                      model_call("p3", "2026-10-06T10:01:20Z", cr=100_500, cw=500),
+                      model_call("p4", "2026-10-06T13:01:20Z", miss="previous_message_not_found", cw=101_500)],
+                     {"start": {"count": 1, "tokens": 100_000}, "ttl": {"count": 1, "tokens": 101_000}},
+                     "control: a fallback whose next call reads from the cache too caused nothing — a pause's rewrite "
+                     "later is a pause (a reason no cause of ours is named after is left aside)", "control"),
+    }
+    for name, (lines, want, label, kind) in cases.items():
+        write(tdir / f"{name}-miss.jsonl", "\n".join(lines) + "\n")
+        rc, out, _ = py("tools/observe.py", "report", "--session", name, "--json", env=env)
+        c = hook_out(out).get("cache") or {}
+        expect(c.get("rebuilds") == want, label, str(c.get("rebuilds")), kind=kind)
     write(tdir / "9a1d0000-names.jsonl", "\n".join([
         model_call("n1", "2026-10-06T10:00:00Z", model="claude-drill[1m]", cw=10_000),
         model_call("n2", "2026-10-06T10:00:10Z", model="claude-drill-2", cr=10_000, cw=10_000),

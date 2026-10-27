@@ -30,10 +30,17 @@ CAUSE_KA = {
     "model": "მოდელის გადართვა",
     "compaction": "compact",
     "restart": "Claude Code გადაიტვირთა, განახლდა ან სესია თავიდან გაიხსნა",
+    "tools": "ხელსაწყოების სია შეიცვალა (მაგ. MCP სერვერი ჩაირთო ან გაითიშა)",
     "ttl": "პაუზა ქეშის ვადაზე გრძელი",
     "other": "მიზეზი უცნობია",
 }
 PART_KA = {"read": "ქეშიდან კითხვა", "write": "ქეშში ჩაწერა", "output": "პასუხი", "uncached": "ქეშის გარეშე"}
+# The cause Claude Code's transcript names itself (an assistant message's diagnostics.cache_miss_reason). The other
+# values seen — messages_changed, previous_message_not_found, unavailable — name no cause of ours and are not used.
+MISS_CAUSE = {"model_changed": "model", "tools_changed": "tools"}
+# A marker that may show on the call after the one it came with: after a refusal Claude Code writes the refused call's
+# cache read on the fallback model's message, and the rewrite comes one call later (2026-10-07, 2026-10-19)
+LATE_MARKERS = {"fallback", "model", "tools"}
 
 
 @dataclass
@@ -55,6 +62,7 @@ class Request:
     compacted: bool = False  # a compaction
     fallback: bool = False  # Claude Code switched the model by itself after a refusal
     restarted: bool = False  # a session_context record: Claude Code (re)opened the session
+    miss: str = ""  # the cache-miss reason the transcript gives for this call itself, e.g. "model_changed"
 
     def update(self, usage: dict) -> None:
         raw = usage.get("cache_creation")
@@ -134,12 +142,14 @@ def cause_of(r: Request, prev: Request | None, big_model: str, pending: set[str]
         return "start"
     if "fallback" in pending:
         return "fallback"
-    if big_model and r.model != big_model:
+    if "model" in pending or (big_model and r.model != big_model):
         return "model"
     if "compaction" in pending:
         return "compaction"
     if "restart" in pending or (prev.version and r.version and r.version != prev.version):
         return "restart"
+    if "tools" in pending:
+        return "tools"
     if prev.t and r.t and r.t - prev.t > ttl_s(r, prev):
         return "ttl"
     return "other"
@@ -149,7 +159,8 @@ def rebuilds(reqs: list[Request]) -> list[tuple[str, Request, int]]:
     """(cause, request, re-written tokens) for every call that wrote again at least REBUILD_TOKENS of the context
     it already had — judged within its own transcript file. New content (a big file just read) is not a rebuild:
     what grew since the previous call is subtracted from the write. A compaction, a restart or a refusal fallback
-    stays pending until the next rebuild, because the call right after one is often small."""
+    stays pending until the next rebuild, because the call right after one is often small; a large call read from the
+    cache ends it — except for a marker that came with that very call and may show one call later (LATE_MARKERS)."""
     by_source: dict[str, list[Request]] = defaultdict(list)
     for r in reqs:
         by_source[r.source].append(r)
@@ -159,14 +170,15 @@ def rebuilds(reqs: list[Request]) -> list[tuple[str, Request, int]]:
         big_model = ""  # the model that held the last large context
         pending: set[str] = set()
         for r in calls:
-            pending |= {name for name, on in (("compaction", r.compacted), ("fallback", r.fallback),
-                                              ("restart", r.restarted)) if on}
+            new = {name for name, on in (("compaction", r.compacted), ("fallback", r.fallback),
+                                         ("restart", r.restarted), (MISS_CAUSE.get(r.miss), r.miss in MISS_CAUSE)) if on}
+            pending |= new
             rewritten = r.write - max(r.context - prev.context, 0) if prev else r.write
             if rewritten >= REBUILD_TOKENS:
                 found.append((cause_of(r, prev, big_model, pending), r, rewritten))
                 pending.clear()
             elif r.context >= REBUILD_TOKENS:
-                pending.clear()  # a large context read from the cache: whatever the marker caused is over
+                pending &= new & LATE_MARKERS  # read from the cache: an older marker caused nothing, a late one may yet
             if r.context >= REBUILD_TOKENS:
                 big_model = r.model
             prev = r
