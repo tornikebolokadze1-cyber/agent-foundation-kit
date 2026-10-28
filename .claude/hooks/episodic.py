@@ -84,6 +84,8 @@ from context_graph import parse_frontmatter, printable, set_field  # noqa: E402
 WORKING_LINES = 60            # cap per injected block
 BRIEF_CHARS = 9_000           # cap on the whole brief: Claude Code keeps a hook text over ~10,000 characters in a file
                               # and shows the agent only its first ~2,000 (measured in transcripts 2026-10-26)
+RECONCILE_SHOWN = 10          # sessions to reconcile named in the brief; INDEX.md and `episodic.py status` list them all
+FACT_CHARS = 150              # a title in the brief's facts — model-written, so no longer than this
 TRANSCRIPT_CHARS = 60_000     # cap on transcript text handed to the summariser: its opening and its end
 HEAD_CHARS = 15_000           # of that, the opening — why the session began; the rest goes to its end
 MESSAGE_CHARS = 8_000         # one message longer than this keeps its start and its end
@@ -741,11 +743,13 @@ def cmd_start(payload: dict) -> int:
     props = open_proposals(root)
     facts = [
         f"- ეს სესია: `{f.relative_to(root).as_posix()}` — compact-ები: {compacts}" if f else "- ეპიზოდი ვერ შეიქმნა (იხ. episodic.log)",
-        f"- ბოლო დახურული სესია: [[{last.stem}]] — {fm_get(read(last), 'title') or 'უსათაურო'}" if last else "- ბოლო დახურული სესია: —",
+        f"- ბოლო დახურული სესია: [[{last.stem}]] — {fm_get(read(last), 'title')[:FACT_CHARS] or 'უსათაურო'}" if last else "- ბოლო დახურული სესია: —",
         f"- ღია წინადადებები (`memory/PROPOSALS.md`): {props}" + (" — შესაფერის მომენტში შესთავაზე მფლობელს გადაწყვეტილება" if props else ""),
     ]
-    if rec:
-        facts.append("- ⚠ გადასამოწმებელი (ავტომატურად შეჯამებული) სესიები: " + ", ".join(rec)
+    if rec:  # the facts are never cut, so each of them stays short: the list names its first few, the index all
+        more = len(rec) - RECONCILE_SHOWN
+        facts.append("- ⚠ გადასამოწმებელი (ავტომატურად შეჯამებული) სესიები: " + ", ".join(rec[:RECONCILE_SHOWN])
+                     + (f" და კიდევ {more} (სრული სია — `memory/episodes/INDEX.md`, ⚠)" if more > 0 else "")
                      + " — `/session-close`-ის დროს შეადარე `plan.md`-ს და `progress.md`-ს")
     if started:
         facts.append(f"- ფონურად იწყება დაუხურავი სესიების შეჯამება: {', '.join(started)}")
@@ -1181,9 +1185,12 @@ def hand_to_summarizer(root: Path, f: Path, why: str, payload: dict, **fields: s
     """Close an episode the catch-up found and start the detached summarizer on it. A session /session-close closed
     that then went on keeps that mark: its summary covers only what came after the close, not the whole session a
     second time (2026-10-18)."""
-    kept = {} if fm_get(read(f), "closed_by") == "session-close" else {"closed_by": "auto"}
-    update_fields(f, status="closed", **fields, **kept)
-    append(f, f"\n## დახურვა — {iso()} (catch-up: {why})\n")
+    text = read(f)
+    kept = {} if fm_get(text, "closed_by") == "session-close" else {"closed_by": "auto"}
+    for k, v in {"status": "closed", **fields, **kept}.items():
+        text = set_field(text, k, v)
+    # One write, so a refused one leaves the episode open for the next start, never closed without its close
+    write_atomic(f, text.rstrip("\n") + f"\n\n## დახურვა — {iso()} (catch-up: {why})\n")
     pfile = save_payload({**payload, "episode": str(f), "reason": "catch-up"}, f.stem[-8:])
     return spawn_detached(["summarize", str(pfile)])
 
