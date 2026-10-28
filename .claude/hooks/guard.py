@@ -120,6 +120,14 @@ SECRET_RE = re.compile(
     re.IGNORECASE)
 # Commands that can name a secret path without reading or staging its content.
 SECRET_SAFE_CMDS = {"ls", "dir", "stat", "test", "[", "echo", "printf", "test-path"}
+# SECRET_RE reads only the literal words of a command, so a name the shell makes up — a glob (`.en?`, `.e*`,
+# `.e[n]v`), a brace list (`.en{v,x}`) or a command substitution (`$(printf .en)v`) — passes B4 unseen
+# (Claude Security F1, 2026-10-28). computed_secret_path() matches such a word against these samples, which mirror
+# SECRET_RE's file kinds and secret directories; the guard drill proves both the literal and the computed path.
+SECRET_FILE_SAMPLES = (".env", ".env.local", "x.pem", "x.key", "x.p12", "x.pfx", "x.jks", "credentials.json",
+                       "serviceaccountkey.json", "id_rsa", "id_ed25519", "id_ecdsa", ".npmrc", ".netrc", "_netrc",
+                       ".git-credentials", ".pgpass")
+SECRET_DIRS = ("secrets", ".ssh", ".aws")
 FROZEN = {"intent": {"accepted"}, "spec": {"approved", "superseded"},
           "plan": {"approved", "in-progress", "done"}, "adr": {"accepted", "rejected", "superseded"}}
 REOPENABLE = {"intent": {"accepted"}, "spec": {"approved"}, "plan": {"approved", "in-progress", "done"}}
@@ -204,6 +212,10 @@ HOOK_SKIP_RE = re.compile(r"\bgit\b.*?\bcommit\b.*?(?:\s-[A-Za-z]*n|--no-veri)|\
 SECRET_NAME_PARTS = {"KEY", "KEYS", "APIKEY", "TOKEN", "TOKENS", "SECRET", "SECRETS", "PASSWORD", "PASSWORDS",
                      "PASSWD", "PASS", "CREDENTIAL", "CREDENTIALS", "PAT"}
 VAR_REF_RE = re.compile(r"\$env:([A-Za-z_]\w*)|\$\{?([A-Za-z_]\w*)|%([A-Za-z_]\w*)%", re.IGNORECASE)
+# S1 — bash indirect expansion: `${!v}` reads the variable whose NAME is held in v, and `${!pre*}`/`${!pre@}` list
+# variable names. VAR_REF_RE needs a name character right after `${`, so `${!…}` slips past it; a command can assign a
+# secret variable's name to v (`v=AWS_SECRET_ACCESS_KEY`) and then print the value with `${!v}` (Claude Security F2).
+INDIRECT_RE = re.compile(r"\$\{!")
 PS_ENV_RE = re.compile(r"(?i)\b(?:get-childitem|gci|dir|ls|get-item|gi|get-content|gc)\b(?:\s+-\w+)*\s+env:")
 CODE_ENV_DUMP_RE = re.compile(r"(?i)\[(?:system\.)?environment\]::getenvironmentvariables\b"
                               r"|\bos\.environ\b(?!\s*(?:\[|\.get\b))|\bprocess\.env\b(?!\s*[.\[])")
@@ -738,8 +750,10 @@ def mask_dquote(span: str) -> str:
 
 
 def mask_substitutions(text: str) -> str:
-    """Each unquoted $(…), <(…) and >(…) as one opaque word: its parens are not grammar to the line around it
-    (`git $(echo commit) -n` is still one command), and substitutions() checks what runs inside."""
+    """Each unquoted $(…), <(…), >(…) and `…` as one opaque word: its parens/backticks are not grammar to the line
+    around it (`git $(echo commit) -n` is still one command), and a backtick body holds a space that would otherwise
+    split the word (``base64 `echo .e`nv`` is one word the shell builds into .env — Claude Security F1). substitutions()
+    checks what runs inside either form."""
     out, i = [], 0
     while i < len(text):
         c = text[i]
@@ -758,6 +772,10 @@ def mask_substitutions(text: str) -> str:
             j = close_paren(text, i + 2)
             out.append(UNQUOTED_SUB)
             i = len(text) if j is None else j + 1
+        elif c == "`":  # the older substitution form, same as $(…): one opaque word (the space inside must not split it)
+            k = text.find("`", i + 1)
+            out.append(UNQUOTED_SUB)
+            i = len(text) if k == -1 else k + 1
         else:
             out.append(c)
             i += 1
@@ -974,6 +992,57 @@ def without_commit_message(args: list[str]) -> list[str]:
     return out
 
 
+COMPUTED_PART_RE = re.compile(r"[*?\[]")  # a glob metachar; a brace list and a substitution are handled apart
+BRACE_LIST_RE = re.compile(r"(?<!\$)\{[^{}]*(?:,|\.\.)[^{}]*\}")  # shell brace expansion needs a comma or `..`
+
+
+def _comp_hits(comp: str, target: str, dot_ok: bool) -> bool:
+    """A glob/substitution path component `comp` can expand to `target`. The shell does not expand a leading
+    wildcard (`*`, `?`, `[`) to a leading-dot name, so a dot target needs a literal dot or a substitution first."""
+    if target.startswith(".") and not dot_ok and comp[:1] in "*?[":
+        return False
+    return fnmatch.fnmatchcase(target, comp)
+
+
+def _dot_capable(comp: str) -> bool:
+    """The original component can begin with a dot: a literal dot, or a substitution / brace list whose output the
+    shell does not glob (so a leading dot is allowed)."""
+    return comp[:1] == "." or comp.startswith((UNQUOTED_SUB, "$(", "`", "{"))
+
+
+def _to_glob(comp: str) -> str:
+    """A component with every shell-computed part turned into a `*`; real glob metachars stay so the dotfile rule
+    still applies to them."""
+    c = comp.replace(UNQUOTED_SUB, "*")
+    c = re.sub(r"\$\([^()]*\)|`[^`]*`", "*", c)
+    return BRACE_LIST_RE.sub("*", c)
+
+
+def computed_secret_path(word: str) -> bool:
+    """A word the shell builds that could become a secret file, or a path inside a secret directory — a glob, a
+    brace list or a command substitution, which SECRET_RE (literal words only) never sees (Claude Security F1). A
+    plain `$VAR` alone is not flagged: that is how the agent names a path it computed, and flagging it would refuse
+    an ordinary `cat $f` (L-014)."""
+    w = word.replace("\\", "/")
+    if not (COMPUTED_PART_RE.search(w) or UNQUOTED_SUB in w or re.search(r"\$\(|`", w) or BRACE_LIST_RE.search(w)):
+        return False
+    comps = w.split("/")
+    last = len(comps) - 1
+    for i, oc in enumerate(comps):
+        g = _to_glob(oc)
+        if not COMPUTED_PART_RE.search(g):  # nothing computed in this component
+            continue
+        # the finding is a computed part GLUED TO literal text (`$(printf .en)v`, `.en?`); a component that is all
+        # wildcards (a bare `$(…)` or a bare `*`) is too unconstrained to tie to a secret — the shell may expand it
+        # to anything, and flagging it would refuse `cat $(…)` and `git commit -- $(git diff --name-only)`
+        if not re.sub(r"\[[^\]]*\]|[*?]", "", g):
+            continue
+        pool = SECRET_FILE_SAMPLES if i == last else SECRET_DIRS
+        if any(_comp_hits(g, t, _dot_capable(oc)) for t in pool):
+            return True
+    return False
+
+
 def check_secret_read(seg: list[str], word: str, start: int, extra: str = "") -> int:
     """B4: a secret path named in a command that could read it, copy it or stage it."""
     named = seg
@@ -983,7 +1052,9 @@ def check_secret_read(seg: list[str], word: str, start: int, extra: str = "") ->
             return 0
         if sub == "commit":
             named = seg[:len(seg) - len(args)] + without_commit_message(args)
-    if not SECRET_RE.search(" ".join(named) + " " + extra):  # extra: the segment's $(…) bodies (review S1)
+    # extra: the segment's $(…) bodies (review S1). A word the shell computes into a secret path (a glob, a brace
+    # list, a substitution) is caught too, so `cat .en?` / `base64 .e*` / `cat $(printf .en)v` no longer pass B4 (F1).
+    if not SECRET_RE.search(" ".join(named) + " " + extra) and not any(computed_secret_path(t) for t in named):
         return 0
     # `echo "$(cat .env)"` runs cat: a redirect or a command/process substitution makes any command unsafe.
     if word in SECRET_SAFE_CMDS and not any(m in t for t in seg for m in (">", "<", "$(", "`")):
@@ -1066,6 +1137,8 @@ def check_env_exposure(seg: list[str], word: str, start: int, extra: str = "") -
             return check_env_exposure(seg, Path(seg[j]).name.lower().removesuffix(".exe"), j)
     args = seg[start + 1:]
     text = " ".join(seg) + " " + extra  # extra: the segment's $(…) bodies (review S1)
+    if INDIRECT_RE.search(text):  # ${!v}: reads the variable NAMED by v — a secret var reached past VAR_REF_RE (F2)
+        return env_block("${!…}")
     what: str | None = None
     names = [a for a in args if not a.startswith("-")]
     printing = any("p" in a.lstrip("-") for a in args if a.startswith("-"))
@@ -1254,6 +1327,8 @@ def check_heredoc_bodies(bodies: list[tuple[bool, str]], depth: int) -> int:
             rc = check_shell(inner, depth + 1)
             if rc:
                 return rc
+        if INDIRECT_RE.search(body):  # `${!v}` in an unquoted heredoc body is expanded too (F2)
+            return env_block("${!…}")
         ref = first_secret_ref(BASH_VAR_RE, body)
         if ref:
             return env_block(ref)

@@ -846,6 +846,7 @@ def g_guard(tmp: Path, vault: Path, approved: Path, state: Path) -> None:
         ("Bash: two harmless commands on two lines", "Bash", {"command": "git status\ngit log -1"}),
         ("Bash: check a key is set without printing it", "Bash", {"command": 'test -n "$OPENAI_API_KEY" && echo set'}),
         ("Bash: ordinary variables (PWD, HOME, SSH_AUTH_SOCK)", "Bash", {"command": "echo $PWD $HOME $SSH_AUTH_SOCK"}),
+        ("Bash: an ordinary ${VAR} expansion (not indirect)", "Bash", {"command": "echo ${HOME}/bin"}),  # D-092 control
         ("Bash: export one variable, set shell options", "Bash", {"command": "export FOO=bar; set -euo pipefail"}),
         ("Bash: search code for os.environ", "Bash", {"command": "grep -rn os.environ tools/"}),
         ("Bash: a program reads a non-secret variable", "Bash", {"command": "py -3.12 -c \"import os; print(os.environ['PATH'])\""}),
@@ -914,6 +915,10 @@ def g_guard(tmp: Path, vault: Path, approved: Path, state: Path) -> None:
         ("Bash: make folders whose path starts with a variable and holds memory/", "Bash",
          {"command": 'mkdir -p "$TMP/x/memory/episodes"'}),
         ("Bash: copy the episodes out by a glob", "Bash", {"command": "cp memory/episodes/EP-*.md /tmp/backup/"}),
+        # D-091 (Claude Security F1): a glob or substitution that CANNOT expand to a secret path stays allowed
+        ("Bash: a glob with a non-secret extension", "Bash", {"command": "head -3 src/*.py"}),
+        ("Bash: read a file named by a plain variable (not a glob or a substitution)", "Bash", {"command": "cat $CONFIG"}),
+        ("Bash: a glob over a non-secret folder", "Bash", {"command": "grep -l TODO docs/*.md"}),
     ]
     for label, tool, ti in controls:
         rc, err = guard(v, state, tool, ti)
@@ -966,6 +971,15 @@ def g_guard(tmp: Path, vault: Path, approved: Path, state: Path) -> None:
         ("B4", "Bash: copy an ssh key", "Bash", {"command": "cp ~/.ssh/id_ed25519 /tmp/k"}),
         ("B4", "Bash: echo with a command substitution", "Bash", {"command": 'echo "$(cat .env)"'}),
         ("B4", "Bash: echo with backticks", "Bash", {"command": "echo `cat .env`"}),
+        # D-091 (Claude Security F1): a secret name the shell BUILDS — SECRET_RE reads only literal words, so these
+        # four forms slipped past B4 until computed_secret_path() (2026-10-28)
+        ("B4", "Bash: a `?` glob expands to .env", "Bash", {"command": "cat .en?"}),
+        ("B4", "Bash: base64 a `*` glob of .e*", "Bash", {"command": "base64 .e*"}),
+        ("B4", "Bash: a `[n]` char-class glob of .e[n]v", "Bash", {"command": "cat .e[n]v"}),
+        ("B4", "Bash: a substitution glued to literal text ($(printf .en)v)", "Bash", {"command": "cat $(printf .en)v"}),
+        ("B4", "Bash: a brace list expands to .env", "Bash", {"command": "cat .en{v,x}"}),
+        ("B4", "Bash: a backtick substitution glued to literal text", "Bash", {"command": "base64 `echo .e`nv"}),
+        ("B4", "Bash: a glob of the .ssh directory, inner name not secret-shaped", "Bash", {"command": "cat .ss?/config"}),
         ("B2", "Bash: unset core.hooksPath", "Bash", {"command": "git config --unset core.hooksPath"}),
         ("B2", "Bash: git commit -n inside $(…)", "Bash", {"command": 'echo "$(git commit -n -m x)"'}),
         ("B3", "Bash: force push inside $(…)", "Bash", {"command": 'echo "$(git push --force origin main)"'}),
@@ -1041,6 +1055,13 @@ def g_guard(tmp: Path, vault: Path, approved: Path, state: Path) -> None:
         ("S1", "Bash: export -p", "Bash", {"command": "export -p"}),
         ("S1", "Bash: bare set", "Bash", {"command": "set"}),
         ("S1", "Bash: echo a secret-named variable", "Bash", {"command": "echo $OPENAI_API_KEY"}),
+        # D-092 (Claude Security F2): bash indirect expansion ${!v} reads the variable NAMED by v, reaching a secret
+        # var past VAR_REF_RE (which needs a name right after `${`)
+        ("S1", "Bash: indirect expansion of a secret var named in another var", "Bash",
+         {"command": "v=AWS_SECRET_ACCESS_KEY; echo ${!v}"}),
+        ("S1", "Bash: direct indirect expansion ${!SECRET}", "Bash", {"command": "echo ${!GITHUB_TOKEN}"}),
+        ("S1", "Bash: indirect expansion in an unquoted cat heredoc body", "Bash",
+         {"command": "cat <<EOF\n${!AWS_SECRET_ACCESS_KEY}\nEOF"}),
         ("S1", "Bash: part of a token via ${…}", "Bash", {"command": "echo ${GITHUB_TOKEN:0:4}"}),
         ("S1", "Bash: a key expanded into a commit message", "Bash", {"command": 'git commit -m "key $ANTHROPIC_API_KEY"'}),
         ("S1", "PowerShell: list Env:", "PowerShell", {"command": "Get-ChildItem Env:"}),
@@ -3381,6 +3402,36 @@ def g_findings(tmp: Path) -> None:
     rc, out = checked("an answer with no finding and no closing line\n")
     expect(rc == 2 and "FINDINGS INCONCLUSIVE" in out, "seeded: nothing readable → exit 2 INCONCLUSIVE, never a pass",
            out[-200:])
+    # D-093 (Claude Security F3): a network (UNC) citation must be refused, and path_problem must refuse it BEFORE
+    # resolve() — on Windows resolve() on `//host/share` contacts the host. This test guards resolve() so it can never
+    # reach a UNC/absolute path (no network) even if the fix is reverted, then checks both layers (ABS_RE, path_problem).
+    d093_src = ('import sys, pathlib\n'
+                'sys.path.insert(0, sys.argv[1] + "/tools")\n'
+                'import check_findings as cf\n'
+                'BS = chr(92)\n'
+                'ok = True\n'
+                'if not (cf.ABS_RE.search("//server/x") and cf.ABS_RE.search(BS * 2 + "server" + BS + "x")):\n'
+                '    print("FAIL ABS_RE misses UNC"); ok = False\n'
+                'if cf.ABS_RE.search("src/x.py"):\n'
+                '    print("FAIL ABS_RE matches a relative path"); ok = False\n'
+                'orig = pathlib.Path.resolve\n'
+                'def guarded(self, *a, **k):\n'
+                '    s = str(self).replace(BS, "/")\n'
+                '    if s.startswith("//") or (len(s) > 1 and s[1] == ":"):\n'
+                '        raise AssertionError("resolve() reached " + s)\n'
+                '    return orig(self, *a, **k)\n'
+                'pathlib.Path.resolve = guarded\n'
+                'try:\n'
+                '    r = cf.path_problem(pathlib.Path(sys.argv[1]), "//server/share/x")\n'
+                'except AssertionError as e:\n'
+                '    print("FAIL path_problem called resolve():", e); ok = False; r = None\n'
+                'if not (r and "absolute or network" in r):\n'
+                '    print("FAIL path_problem did not refuse the UNC:", r); ok = False\n'
+                'print("D093-OK" if ok else "D093-FAIL")\n')
+    d093 = write(tmp / "d093_unc.py", d093_src)
+    rc, out, err = check([PY, str(d093), str(CODE)])
+    expect(rc == 0 and "D093-OK" in out, "findings: a network (UNC) citation is refused and path_problem never resolves "
+           "it — no host contacted even if reverted (Claude Security F3)", (out + err)[-240:])
 
 
 def g_claude_cli(tmp: Path) -> None:
@@ -4102,11 +4153,14 @@ SECRET_READ_DENY = (
     "Read(.env)", "Read(.env.local)", "Read(.env.*.local)", "Read(.env.production)", "Read(.env.development)",
     "Read(.env.staging)", "Read(.env.test)", "Read(.env.prod)", "Read(.env.dev)", "Read(.env.stage)", "Read(.env.bak)",
     "Read(.env.backup)", "Read(.env.old)", "Read(.env.orig)", "Read(.env.save)", "Read(.env.secret)",
-    "Read(.env.secrets)", "Read(.envrc)", "Read(*.pem)", "Read(*.key)", "Read(*.p12)", "Read(*.pfx)", "Read(*.jks)",
+    "Read(.env.secrets)", "Read(.env.*)", "Read(.envrc)", "Read(*.pem)", "Read(*.key)", "Read(*.p12)", "Read(*.pfx)",
+    "Read(*.jks)",
     "Read(id_rsa)", "Read(id_ed25519)", "Read(id_ecdsa)", "Read(**/.ssh/**)", "Read(**/.aws/**)", "Read(~/.ssh/**)",
     "Read(~/.aws/**)", "Read(/secrets/**)", "Read(credentials*.json)", "Read(serviceAccountKey*.json)",
-    "Read(**/.env)", "Read(**/.env.local)", "Read(**/.env.production)", "Read(**/*.pem)", "Read(**/*.key)",
-    "Read(**/secrets/**)",
+    "Read(**/.env)", "Read(**/.env.local)", "Read(**/.env.production)", "Read(**/.env.*)", "Read(**/*.pem)",
+    "Read(**/*.key)", "Read(**/secrets/**)",
+    # Read(.env.*) / Read(**/.env.*) close a gap: the fixed suffix list missed .env.ci, .env.preview, etc., which
+    # .gitignore, the guard and redact.SECRET_KINDS all treat as secret (Claude Security F4, 2026-10-28)
     # tokens and passwords other tools keep in the project or in $HOME — the guard knew them, Read did not (review
     # 2026-10-22 H2)
     "Read(.npmrc)", "Read(~/.npmrc)", "Read(.netrc)", "Read(~/.netrc)", "Read(_netrc)", "Read(~/_netrc)",
@@ -4171,7 +4225,7 @@ def g_wiring(tmp: Path, vault: Path) -> None:
     lost = lost_secret_rules(perms.get("deny", []))
     expect(not lost, f"deny list keeps all {len(SECRET_READ_DENY)} secret-file Read rules a live session proved "
            "(D-021)", "missing: " + ", ".join(lost))
-    for gone in ("Read(.env.prod)", "Read(id_rsa)"):
+    for gone in ("Read(.env.prod)", "Read(id_rsa)", "Read(.env.*)", "Read(**/.env.*)"):  # .env.* : D-094 (F4)
         rest = [rule for rule in perms.get("deny", []) if rule != gone]
         expect(lost_secret_rules(rest) == [gone], f"seeded: a deny list without {gone} is caught by name",
                str(lost_secret_rules(rest)))
