@@ -54,7 +54,7 @@ REVIEW_END_RE = re.compile(r"^(VERDICT|POSITION):\s*([A-Za-z-]+)$")
 CRITIC_END_RE = re.compile(r"^([A-Z][A-Z-]*):\s*(?:(\d+) critical,\s*)?(\d+) high,\s*(\d+) medium,\s*(\d+) low\s*[—–-]+\s*"
                            r"VERDICT\s+(OK|FAIL|INCONCLUSIVE)$")  # CODE-QUALITY has no critical count
 LOC_RE = re.compile(r"(?P<path>[^\s`'\"()\[\],;:#]+)(?::(?P<a>\d+)(?:\s*[-–]\s*(?P<b>\d+))?|#L(?P<c>\d+)(?:-L?(?P<d>\d+))?)")
-ABS_RE = re.compile(r"(?:^|[\s(`'\"])(?:[A-Za-z]:[\\/]|[\\/](?=[\w.~-])|~(?=[\\/]))")  # C:/…, /…, \\server, ~/…
+ABS_RE = re.compile(r"(?:^|[\s(`'\"])(?:[A-Za-z]:[\\/]|[\\/]{2}|[\\/](?=[\w.~-])|~(?=[\\/]))")  # C:/…, /…, \\server, //server, ~/…
 QUOTE_RE = re.compile(r"(`+)(.+?)\1", re.S)
 DOC_RE = re.compile(r"\b(SPEC|PLAN|ADR)-(\d{4})\b")
 DOC_GLOB = {"SPEC": "docs/specs/SPEC-{}*.md", "PLAN": "docs/plans/PLAN-{}*.md", "ADR": "docs/adr/ADR-{}*.md"}
@@ -153,6 +153,11 @@ def path_problem(root: Path, raw: str) -> str | None:
     secret file is never opened, whoever names it — the review may be a model's (review S2)."""
     if ".." in raw.split("/"):
         return f"[outside] {raw}: a `..` in the path — cite it from the project root, without climbing"
+    # An absolute, drive-rooted or network-share (UNC) path is refused BEFORE any filesystem call, so resolve() never
+    # reaches out to a remote host named in the (possibly model-authored) review — on Windows that can leak a network
+    # credential hash (Claude Security F3). A citation is always relative to the project root.
+    if raw.startswith("/") or re.match(r"[A-Za-z]:", raw):
+        return f"[outside] {raw}: an absolute or network path — cite it relative to the project root"
     real = (root / raw).resolve()
     if not real.is_relative_to(root):
         return f"[outside] {raw} resolves outside the project (through a link)"
