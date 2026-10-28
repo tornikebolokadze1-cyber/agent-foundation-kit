@@ -570,7 +570,7 @@ def g_graph_stage(tmp: Path, vault: Path) -> None:
             ("§7 empty, the check's line in the history → the approval offered", "", checked, "შენს დამტკიცებას ელოდება",
              True, "seeded"),
             ("the check ran and put its question for the person into §7 → still the interview until it is answered",
-             "1. Q8 — რამდენი ნაწარმია?\n\n", checked, interview, True, "seeded")):
+             "1. Q8 — რამდენი ნაწარმია?\n\n", checked, interview, True, "control")):
         v = fresh(tmp, f"stage-d083-{abs(hash(label))}", vault)
         edit(v / intent, "[[ADR-0001-demo]].\n", "[[ADR-0001-demo]].\n" + seven.format(q=q, h=h))
         out = py("tools/context_graph.py", "--root", str(v), "stage")[1]
@@ -1353,6 +1353,30 @@ def g_episodic(tmp: Path, vault: Path) -> None:
     expect(all(s in ctx for s in ("DRILL-STATE", "DRILL-PHASE", "DRILL-TODO"))
            and all(f"სრული ტექსტი `{n}`-შია" in ctx for n in ("progress.md", "plan.md", "tasks/todo.md")),
            "seeded: each long block keeps its start and names the file that holds it whole", ctx[-300:])
+    # the facts are never cut, so none of them may grow without end: a project that never reconciles piles up sessions
+    for n, label, kind in ((3, "a few sessions to reconcile → all named", "control"),
+                           (30, "thirty sessions to reconcile → ten named, the rest counted and pointed to", "seeded")):
+        w = fresh(tmp, f"episodic-reconcile-{n}", vault)
+        title = " ძალიან გრძელი სათაური" * 30 if n > 10 else ""  # and a title the summarizer wrote may run long
+        for i in range(n):
+            write(w / f"memory/episodes/EP-2026-01-01-{i:08x}.md", FM.format(
+                body=f'id: EP-2026-01-01-{i:08x}\ntype: episode\ntitle: "r{i}{title}"\n'
+                     f'session: {i:08x}-0000-4000-8000-000000000000\n'
+                     'date: 2026-01-01\nstatus: closed\ncompacts: 0\nclosed_by: auto\nneeds_reconcile: true\n')
+                + f"# EP-2026-01-01-{i:08x}\n")
+        rc, out, _ = py(".claude/hooks/episodic.py", "start", stdin=json.dumps(
+            {"session_id": f"9a1e0{n:03d}-0000-4000-8000-000000000086", "source": "startup"}),
+            env={**episode_env(w, state, stub_cmd, marker), "EPISODIC_AUTOSUMMARY": "0"})
+        ctx = json.loads(out).get("hookSpecificOutput", {}).get("additionalContext", "") if out.strip().startswith("{") else ""
+        line = next((ln for ln in ctx.splitlines() if "გადასამოწმებელი" in ln), "")
+        named = len(re.findall(r"EP-2026-01-01-[0-9a-f]{8}", line))
+        expect(named == min(n, 10) and (f"და კიდევ {n - 10}" in line) == (n > 10), f"the brief's facts: {label}",
+               f"{named} named; {line[:160]}", kind=kind)
+        if title:
+            shown = next((ln for ln in ctx.splitlines() if "ბოლო დახურული სესია" in ln), "").partition(" — ")[2]
+            expect(shown.startswith("r") and len(shown) <= 150,
+                   f"seeded: the last closed session's {len(title) + 3}-character title → the brief keeps 150 of it",
+                   f"{len(shown)} characters kept: {shown[:80]}")
     # The last closed session is the one that ended last; a name sorts a day's sessions by their id (review 2026-10-22 M3)
     w = fresh(tmp, "episodic-last-closed", vault)
 
@@ -2063,10 +2087,11 @@ def g_catchup_refused(tmp: Path, v: Path, env: dict) -> None:
     old = time.time() - 7 * 3600
     os.utime(stub, (old, old))
 
-    def start(n: int, cmd: list[str], refuse: str = "", tp: str = "") -> tuple[int, str, str]:
+    def start(n: int, cmd: list[str], refuse: str = "", tp: str = "", nth: int = 0) -> tuple[int, str, str]:
         payload = {"session_id": f"fe55008{n}-0000-4000-8000-00000000008{n}", "source": "startup",
                    **({"transcript_path": tp} if tp else {})}
-        rc, out, err = check(cmd, stdin=json.dumps(payload), env={**env, "DRILL_REFUSE": refuse})
+        rc, out, err = check(cmd, stdin=json.dumps(payload), env={**env, "DRILL_REFUSE": refuse,
+                                                                   "DRILL_REFUSE_NTH": str(nth)})
         try:
             brief = json.loads(out).get("hookSpecificOutput", {}).get("additionalContext", "")
         except ValueError:
@@ -2080,6 +2105,7 @@ def g_catchup_refused(tmp: Path, v: Path, env: dict) -> None:
     refusing = [PY, str(write(tmp / "write-refused.py", (
         "import os, pathlib, runpy, sys\n"
         "name = os.environ['DRILL_REFUSE']\n"
+        "nth, seen = int(os.environ.get('DRILL_REFUSE_NTH') or 0), [0]\n"  # 0: refuse every replace; n: only the n-th
         "real_unlink, real_replace = pathlib.Path.unlink, os.replace\n"
         "def unlink(self, missing_ok=False):\n"
         "    if self.name.endswith(name):\n"
@@ -2087,7 +2113,9 @@ def g_catchup_refused(tmp: Path, v: Path, env: dict) -> None:
         "    return real_unlink(self, missing_ok=missing_ok)\n"
         "def replace(src, dst, **kw):\n"
         "    if pathlib.Path(dst).name.endswith(name):\n"
-        "        raise PermissionError(13, 'used by another process (drill)', str(dst))\n"
+        "        seen[0] += 1\n"
+        "        if not nth or seen[0] == nth:\n"
+        "            raise PermissionError(13, 'used by another process (drill)', str(dst))\n"
         "    return real_replace(src, dst, **kw)\n"
         "pathlib.Path.unlink, os.replace = unlink, replace\n"
         "sys.argv = [sys.argv[1], 'start']\n"
@@ -2120,6 +2148,22 @@ def g_catchup_refused(tmp: Path, v: Path, env: dict) -> None:
            and not list((v / "memory/episodes").glob("EP-*-b0810000.md")),
            "seeded: a session that ran without this engine's hooks, whose episode cannot be written → SessionStart still "
            "brings the working memory and the log says why", f"rc={rc}, brief {len(brief)} characters; {err[-160:]}")
+    # the hand-off writes once: a refusal between two writes left an episode closed without its close, which no later
+    # start picked up again (found in review, 2026-10-27)
+    went_quiet = tmp / "transcripts-d081" / "went-quiet.jsonl"
+    make_transcript(went_quiet, datetime.now().astimezone() - timedelta(hours=8))
+    sid = "1d1e0082-0000-4000-8000-000000000082"
+    idle = write(v / f"memory/episodes/EP-{TODAY}-{sid[:8]}.md", FM.format(
+        body=f'id: EP-{TODAY}-{sid[:8]}\ntype: episode\ntitle: ""\nsession: {sid}\ndate: {TODAY}\nstatus: open\n'
+             f'compacts: 0\ntranscript: "{went_quiet.as_posix()}"\nclosed_by: ""\nclosed_at: ""\nneeds_reconcile: false\n')
+        + f"# EP-{TODAY}-{sid[:8]}\n\n## შეჯამება\n\n_ჯერ არ არის_\n")
+    os.utime(idle, (old, old))
+    rc, brief, err = start(5, refusing, refuse=idle.name, nth=2)
+    text = read_settled(idle)
+    expect(rc == 0 and "### სესიის ფაქტები" in brief and "status: closed" in text and "## დახურვა" in text,
+           "seeded: a write refused after the catch-up's first one to an idle episode → the episode is closed with its "
+           "close, never without it", f"closed: {'status: closed' in text}, close heading: {'## დახურვა' in text}; "
+           f"{err[-160:]}")
 
 
 def g_find_claude(tmp: Path) -> None:
