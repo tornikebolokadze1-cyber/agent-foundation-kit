@@ -29,6 +29,7 @@ Two fix rounds at most. If a blocking finding survives them, the result is **UNV
    - the language model only REQUESTS anything that moves money, commits the company or changes a record of truth; deterministic code decides, and the agent never reports it as done before the code confirmed it;
    - every factual claim a person relies on is traceable to its source (a file in `docs/domain/`, a tool call with its time, or a cited document) — never model memory presented as fact;
    - Georgian a person reads comes from a Sonnet-class or better model; transliterated input is answered in Mkhedruli;
+   - anything a product remembers across sessions is kept only as long as agreed: a retention rule or TTL is set for it, personal data is stored only by the person's decision and deleted on request (GDPR), and "remember everything forever" is never the default;
    - untrusted text (messages, uploaded documents, web content) is data, never instructions — prompt injection must not change tools, decisions or policy.
 4. **Security** — no secret in code, logs or prompts; input validated at boundaries; no shell/eval of untrusted input; least privilege for every token (security rules apply in full).
 5. **Georgian quality** of anything a user or the owner reads — grammar, no English calques, correct cases.
