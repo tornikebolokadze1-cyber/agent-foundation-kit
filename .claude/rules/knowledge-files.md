@@ -17,14 +17,15 @@ paths:
   An engine ADR carries `scope: engine` (the engine's own rule — it never holds up the project's stage);
   a project ADR has no `scope`. Any other value is a SCOPE error.
 - **Statuses:** intent draft/accepted · spec draft/review/approved/superseded ·
-  plan draft/approved/in-progress/done · adr proposed/accepted/rejected/superseded.
+  plan draft/approved/in-progress/done/live · adr proposed/accepted/rejected/superseded.
   You may set only: intent draft · spec draft, review · plan draft, and in-progress/done on an approved
   plan · adr proposed. Everything else is the owner's `/approve` (guard G4 blocks it; gate LEDGER
   catches any status without an owner record).
-- **Frozen:** accepted intent, approved spec, decided ADR. Change = reopen (an edit that only sets
+- **Frozen:** accepted intent, approved spec, decided ADR, live plan. Change = reopen (an edit that only sets
   `status: draft`), then edit, then ask the owner to approve again. An ADR is never reopened — write a
   new one with `supersedes: "[[ADR-…]]"`. Approved plans: tick boxes, append under `## გადახრები`,
-  approved → in-progress → done.
+  approved → in-progress → done; done → live is the owner's `/approve live N` alone (stage 6, ADR-0013) —
+  a live plan is never reopened, what follows it is a new spec.
 - **Links:** `[[file-stem]]` — the FILE name, not the id (`[[ADR-0003-context-graph-obsidian]]`, not
   `[[ADR-0003]]`); a README by path (`[[memory/README]]`); in frontmatter always quoted (`"[[intent]]"`).
   Relative Markdown links for files outside the knowledge set (`[x](../../research/…/file.md)`).

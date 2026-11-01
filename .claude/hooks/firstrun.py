@@ -7,7 +7,9 @@ SessionStart hook (startup, resume, clear). It runs `git init` when the folder i
 core.hooksPath = .githooks in this repository only, makes the commit hook executable on macOS and Linux (a copy
 without file modes loses that bit, and git then skips the hook), and checks git itself, git's name and e-mail,
 Python 3.12+ and gitleaks; a project inside another repository, or a core.hooksPath of the person's own, is
-reported and left alone. Install hints name Windows, macOS and Linux.
+reported and left alone. Install hints name Windows, macOS and Linux. It also says once where Claude Code's sandbox
+stands (ADR-0014; read by tools/sandbox_state.py: none on native Windows — WSL2 has it; off until the person switches it
+on) — it never switches the sandbox on.
 Silent when everything is in place; otherwise one short Georgian note for the agent: what was done and what is
 missing. It never touches the global git config (L-005), never installs anything (installing a tool is the person's
 yes) and never fails the session — it always exits 0. Missing tools are reported once per repository (a marker
@@ -36,6 +38,7 @@ os.environ["NoDefaultCurrentDirectoryInExePath"] = "1"
 
 HERE = Path(__file__).resolve()
 sys.path.insert(0, str(HERE.parents[2] / "tools" / "gates"))
+sys.path.insert(0, str(HERE.parents[2] / "tools"))
 MARKER = "engine-firstrun"  # inside .git/: the notes about missing tools that were already given
 INSTALL = {  # what to offer the person, per system; installing is always their yes. py.sh repeats "python": change both
     "git": "Windows: `winget install Git.Git`; macOS: `xcode-select --install` ან `brew install git`; "
@@ -81,6 +84,17 @@ def gitleaks_note() -> str | None:
     return ("gitleaks არ არის — საიდუმლოებს commit-ზე ძრავის საკუთარი სკანერი ამოწმებს (უფრო სუსტია: git-ის "
             "ისტორიას არ ამოწმებს); შესთავაზე ადამიანს gitleaks-ის დაყენება მისი „კი“-თ "
             f"({INSTALL['gitleaks']})")
+
+
+def sandbox_note(root: Path) -> str | None:
+    """What the agent is told once about Claude Code's sandbox (ADR-0014) — None when it is on; a reading that fails
+    is said too, never skipped."""
+    try:
+        import sandbox_state as sb
+        return sb.firstrun_note(*sb.sandbox_state(root))
+    except Exception as e:  # a copy without tools/sandbox_state.py, say — say so
+        return (f"sandbox-ის მდგომარეობის წაკითხვა ვერ მოხერხდა ({type(e).__name__}: {e}) — `tools/sandbox_state.py` "
+                "ხელით უნდა შემოწმდეს")
 
 
 def setup(root: Path) -> tuple[list[str], list[str], list[str]]:
@@ -176,6 +190,9 @@ def main() -> int:
     root = project_root()
     try:
         done, missing, gate_off = setup(root)
+        sandbox = sandbox_note(root)
+        if sandbox:
+            missing.append(sandbox)
         marker, text = marker_path(root), "\n".join(missing)
         if was_told(marker, text):
             missing = []  # a missing tool is said once; commit checks that are off are said every session

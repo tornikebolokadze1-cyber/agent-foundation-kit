@@ -12,7 +12,7 @@ the agent, and checks it mechanically.
                                                                        issues that involve those files
   bash .claude/hooks/py.sh tools/context_graph.py query ID [--depth N] one node's neighbourhood (ID or file stem)
   bash .claude/hooks/py.sh tools/context_graph.py pending              documents waiting for the owner's /approve
-  bash .claude/hooks/py.sh tools/context_graph.py stage                where the project stands (F1–F5) and what comes next
+  bash .claude/hooks/py.sh tools/context_graph.py stage                where the project stands (F1–F6) and what comes next
   bash .claude/hooks/py.sh tools/context_graph.py brief                SessionStart hook: rebuild + stage + short brief
 
 Exit codes (check): 0 = no errors, 1 = errors found, 2 = inconclusive (nothing
@@ -78,7 +78,7 @@ SCHEMA: dict[str, dict] = {
     "spec":     {"required": ("id", "type", "title", "status", "created", "updated", "intent"),
                  "status": ("draft", "review", "approved", "superseded")},
     "plan":     {"required": ("id", "type", "title", "status", "created", "updated", "spec"),
-                 "status": ("draft", "approved", "in-progress", "done")},
+                 "status": ("draft", "approved", "in-progress", "done", "live")},
     "adr":      {"required": ("id", "type", "title", "status", "date"),
                  "status": ("proposed", "accepted", "rejected", "superseded")},
     "domain":   {"required": ("id", "type", "title", "status", "updated"), "status": ("living",)},
@@ -98,7 +98,7 @@ ID_PATTERNS = {
 OWNER_STATUSES = {
     "intent": {"accepted"},
     "spec": {"approved", "superseded"},
-    "plan": {"approved"},
+    "plan": {"approved", "live"},  # live: the owner saw it working and the pilot is over — `/approve live N` (ADR-0013)
     "adr": {"accepted", "rejected", "superseded"},
 }
 # The statuses an agent may write — exactly the ones that mean "waiting for the owner".
@@ -693,7 +693,7 @@ def _check_chain_and_ledger(g: Graph) -> list[Issue]:
                 out.append(Issue("error", "CHAIN-SPEC", n.path, 1,
                                  f"spec is {st} but its intent is {shown} — the owner must accept intent.md first",
                                  tuple(i.path for i in intents)))
-        if typ == "plan" and st in ("approved", "in-progress", "done"):
+        if typ == "plan" and st in ("approved", "in-progress", "done", "live"):
             specs = _rel_targets(g, n, "spec")
             if not specs or specs[0].status != "approved":
                 shown = specs[0].status if specs else "missing"
@@ -724,6 +724,8 @@ def _ledger_requirement(typ: str, st: str) -> str | None:
         return "accepted"
     if typ == "spec" and st == "approved":
         return "approved"
+    if typ == "plan" and st == "live":
+        return "live"
     if typ == "plan" and st in ("approved", "in-progress", "done"):
         return "approved"
     if typ == "adr" and st in ("accepted", "rejected", "superseded"):
@@ -907,9 +909,11 @@ def interview_state(path: Path) -> str:
 def pending(g: Graph, engine: bool = False) -> list[Node]:
     """Documents waiting for the owner's /approve: the project's own, or (engine=True) the engine's ADRs. An intent
     whose §1 is still the template is not offered — there is nothing in it to approve yet —, nor one whose interview
-    is over while its builder check has not run (D-083)."""
+    is over while its builder check has not run (D-083). A finished plan (`done`) waits for the owner's `/approve live N`
+    (ADR-0013)."""
     out = [n for n in g.nodes.values() if not n.foreign and n.type in PENDING_STATUSES
-           and n.status in PENDING_STATUSES[n.type] and is_engine(n) == engine
+           and (n.status in PENDING_STATUSES[n.type] or (n.type == "plan" and n.status == "done"))
+           and is_engine(n) == engine
            and not (n.type == "intent" and (not idea_written(g.root / n.path)
                                             or interview_state(g.root / n.path) == "check"))]
     order = {"intent": 0, "spec": 1, "plan": 2, "adr": 3}
@@ -922,14 +926,18 @@ def approve_hint(n: Node) -> str:
     m = re.fullmatch(r"[A-Z]+-(\d{4})", n.id)
     if not m:  # e.g. SPEC-0002-0001 would otherwise read as `/approve spec 0001` — a different document (review S5)
         return "(id არასწორია — ჯერ frontmatter-ის id უნდა გასწორდეს)"
+    if n.type == "plan" and n.status == "done":  # the owner's word after the show and the pilot (ADR-0013)
+        return f"/approve live {m.group(1)}"
     return f"/approve {n.type} {m.group(1)}"
 
 
 # ── Stage conductor (ADR-0011) ───────────────────────────────────────────────
-# The stages are not new: they are ADR-0001's loop (intent → spec → plan → code → gates → review) and plan.md's
-# phases F1–F5. The conductor stores nothing — each call reads the same statuses the graph reads and says where the
-# project stands and what comes next, for the person and for the agent.
-STAGES = {1: "განზრახვა", 2: "სპეციფიკაცია", 3: "არქიტექტურა", 4: "გეგმა და აშენება", 5: "ჩვენება და პილოტი"}
+# The stages are not new: they are ADR-0001's loop (intent → spec → plan → code → gates → review → show → run and
+# observe, ADR-0013) and plan.md's phases F1–F6. The conductor stores nothing — each call reads the same statuses the
+# graph reads and says where the project stands and what comes next, for the person and for the agent. Stage 6 begins
+# with the owner's own word: a finished plan (`done`) becomes `live` only through `/approve live N`.
+STAGES = {1: "განზრახვა", 2: "სპეციფიკაცია", 3: "არქიტექტურა", 4: "გეგმა და აშენება", 5: "ჩვენება და პილოტი",
+          6: "გაშვება და დაკვირვება"}
 
 
 @dataclass
@@ -961,7 +969,7 @@ class Stage:
             f"- **{self.label}** — {self.step}{where}",
             f"- ადამიანს: {self.person}",
             f"- აგენტს: {self.agent}",
-            f"- გზა (ADR-0001-ის ციკლი, plan.md-ის F1–F5): {path}. ადამიანს ეტაპი ჩვეულებრივი სიტყვებით უთხარი, "
+            f"- გზა (ADR-0001-ის ციკლი, plan.md-ის F1–F6): {path}. ადამიანს ეტაპი ჩვეულებრივი სიტყვებით უთხარი, "
             "ბრძანება — ზუსტად.",
             "- ეს ბლოკი ყოველ ჯერზე დოკუმენტების სტატუსებიდან ითვლება: თუ progress.md-ის, plan.md-ის ან tasks/todo.md-ის "
             "ჩანაწერი მას ეწინააღმდეგება, ის ჩანაწერი ძველია — ამ ბლოკს მიჰყევი, ჩანაწერი კი `/session-close`-ით გაასწორე.",
@@ -1073,6 +1081,15 @@ def project_stage(g: Graph) -> Stage:
     plan = plans[-1]
     if plan.status == "draft":
         return _review(4, plan, f"{plan.id} შენს გადახედვას ელოდება", "`/feature-plan`")
+    if plan.status == "live":  # the owner's `/approve live N` after the show and the pilot (ADR-0013)
+        return Stage(6, short="ცოცხალია — დააკვირდი", step=f"{plan.id} ცოცხალშია — გაშვება და დაკვირვება",
+                     person="დააკვირდი ცოცხალ შედეგს: რას ამბობენ მომხმარებლები, სად ცდება, რა ჯდება; რაც არ მუშაობს ან "
+                            "აკლია — უბრალოდ დაწერე, ის ახალი სპეციფიკაცია გახდება",
+                     agent="დაკვირვების რიტმი და საზომები — სპეციფიკაციის §6 (წარმატების საზომი) და გაიდის §6; ხარჯი და "
+                           "აგენტების საქმე — `/observatory`; AI-პროდუქტზე eval-ნაკრები მოდელის ან ინსტრუქციის ყოველ "
+                           "ცვლილებაზე თავიდან ეშვება (drift); ცოცხალი შეცდომა ჯერ ტესტი ან eval-შემთხვევა ხდება, მერე "
+                           "ამოცანა ან ახალი `/spec` — უკუკავშირის მარყუჟი (ADR-0013)"
+                           + guide_note(g, "§6 — გაშვება და დაკვირვება"), doc=plan.path)
     if plan.status != "done":
         return Stage(4, short=f"{plan.id} მიმდინარეობს", step=f"{plan.id} მიმდინარეობს — აგენტი ამოცანა-ამოცანა აშენებს",
                      person="აგენტი ამოცანა-ამოცანა აშენებს; როცა რამეს გკითხავს — შენს მონაცემებს, „კი“-ს დაყენებაზე "
@@ -1080,10 +1097,14 @@ def project_stage(g: Graph) -> Stage:
                      agent=(CHECKS_FIRST if code_checks_off(g.root) else "")
                      + f"შეასრულე {plan.id} ამოცანა-ამოცანა (`/feature-plan`, ნაწილი B): ტესტი, კოდი, gate-ები, commit; "
                        "ბოლოს აჩვენე შედეგი", doc=plan.path)
-    return Stage(5, short="ნახე შედეგი", step=f"{plan.id} დასრულებულია",
-                 person="ნახე შედეგი; ახალი იდეა ან ცვლილება — უბრალოდ დაწერე",
-                 agent="აჩვენე შედეგი ცოცხლად (სად გახსნას, რა ნახოს, რა სცადოს); ახალი ფუნქცია ან ცვლილება — ახალი "
-                       "`/spec`" + guide_note(g, "§4 — როგორ აჩვენო"), doc=plan.path)
+    cmd = approve_hint(plan)
+    return Stage(5, short="ნახე შედეგი", step=f"{plan.id} დასრულებულია — ჩვენება და პილოტი",
+                 person="ნახე შედეგი და სცადე; გამოქვეყნება და პილოტი — შენი „კი“-თ; როცა ცოცხლად მუშაობს და კმაყოფილი "
+                        f"ხარ — `{cmd}`; რაც არ მოგწონს — უბრალოდ დაწერე",
+                 agent="აჩვენე შედეგი ცოცხლად (სად გახსნას, რა ნახოს, რა სცადოს); გამოქვეყნება და პილოტი — ადამიანის „კი“-თ; "
+                       f"მე-6 ეტაპზე მხოლოდ მისი `{cmd}` გადაიყვანს — `live`-ს თავად არასდროს წერ; ახალი ფუნქცია ან "
+                       "ცვლილება — ახალი `/spec`" + guide_note(g, "§4 — როგორ აჩვენო, გამოაქვეყნო და პილოტი ჩაატარო"),
+                 command=cmd, doc=plan.path)
 
 
 def to_json(g: Graph) -> dict:

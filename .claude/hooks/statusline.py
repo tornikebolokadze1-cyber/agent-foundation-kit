@@ -3,8 +3,8 @@
 """The engine's status line (ADR-0010): the owner's own status line, the project's stage (ADR-0011) and one line about
 the prompt cache.
 
-The stage line names where the project stands in the F1–F5 loop and the person's next command, read from the documents'
-statuses by tools/context_graph.py (`🧭 ეტაპი 2/5 · სპეციფიკაცია — SPEC-0001 გელოდება → /approve spec 0001`).
+The stage line names where the project stands in the F1–F6 loop and the person's next command, read from the documents'
+statuses by tools/context_graph.py (`🧭 ეტაპი 2/6 · სპეციფიკაცია — SPEC-0001 გელოდება → /approve spec 0001`).
 
 Claude Code runs the project's `statusLine` command on every update and every `refreshInterval` seconds, with a
 JSON payload on stdin (session_id, transcript_path, model, context_window …), and shows what it prints. A project
@@ -24,6 +24,9 @@ write; each request renews the life):
   ♻ ქეში: უცნობია (…)                              nothing readable — never shown as warm
 The request time is taken from the record written just before the answer began (looked for in the last 4 MB), so
 the estimate errs early.
+The cache line ends with where Claude Code's sandbox stands (ADR-0014), read by tools/sandbox_state.py from the system
+and the settings — `🛡 sandbox ჩართულია (settings, Linux)`, `🛡 sandbox გამორთულია (macOS)`, `🛡 sandbox არ არის — Windows
+(WSL2-ში მუშაობს)`; when that reading fails, `🛡 sandbox: უცნობია (…)` — never nothing.
 A status line must never break the screen: this script always exits 0 and prints a short marker, never a traceback.
 The owner's line runs through bash found on PATH — never from the current folder or from inside this project, where a
 file could be planted — and it gets 4 seconds, after which it is stopped together with everything it started.
@@ -315,6 +318,15 @@ def stage_line() -> str:
     return f"{CYAN}🧭 {cg.project_stage(cg.load(root)).status_line()}{RESET}"
 
 
+def sandbox_line() -> str:
+    """Where Claude Code's sandbox stands for this project (ADR-0014): read from the system and the settings by
+    tools/sandbox_state.py — what is, never what should be."""
+    import sandbox_state as sb
+    state, system = sb.sandbox_state(ROOT)
+    colour = GREEN if state == "on" else (YELLOW if state == "off" else DIM)
+    return f"{colour}{sb.status_text(state, system)}{RESET}"
+
+
 def main() -> int:
     payload = sys.stdin.read()
     if os.environ.get(INNER):
@@ -337,7 +349,11 @@ def main() -> int:
         second = cache_line(data, time.time())
     except Exception as e:
         second = f"{DIM}♻ ქეში: უცნობია ({type(e).__name__}){RESET}"
-    print("\n".join(line for line in (first, stage, second) if line))
+    try:
+        shield = sandbox_line()
+    except Exception as e:
+        shield = f"{DIM}🛡 sandbox: უცნობია ({type(e).__name__}){RESET}"
+    print("\n".join(line for line in (first, stage, f"{second} · {shield}") if line))
     return 0
 
 
