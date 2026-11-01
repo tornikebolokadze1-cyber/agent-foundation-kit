@@ -129,7 +129,8 @@ SECRET_FILE_SAMPLES = (".env", ".env.local", "x.pem", "x.key", "x.p12", "x.pfx",
                        ".git-credentials", ".pgpass")
 SECRET_DIRS = ("secrets", ".ssh", ".aws")
 FROZEN = {"intent": {"accepted"}, "spec": {"approved", "superseded"},
-          "plan": {"approved", "in-progress", "done"}, "adr": {"accepted", "rejected", "superseded"}}
+          "plan": {"approved", "in-progress", "done", "live"}, "adr": {"accepted", "rejected", "superseded"}}
+# a live plan (the owner's `/approve live N`, ADR-0013) is not reopened: what follows it is a new spec
 REOPENABLE = {"intent": {"accepted"}, "spec": {"approved"}, "plan": {"approved", "in-progress", "done"}}
 PLAN_MOVES = {("approved", "in-progress"), ("in-progress", "done")}
 DEVIATIONS_HEADING = "## გადახრები"
@@ -1418,12 +1419,21 @@ def check_shell(cmd: str, depth: int = 0, ps: bool = False) -> int:
 
 
 def main() -> int:
+    """Exit 0 lets the call through, 2 blocks it with the stderr text as the reason. A guard that cannot read the call,
+    or crashes inside a check, blocks it too (ADR-0014; until 2026-11-01 both let the call through, and L-020 was a
+    session that ran with the guard silently off): the person sees a one-line reason at once. `onFailure: block` on the
+    hook (settings.json) does the same when this script cannot start at all."""
     raw = sys.stdin.read()
     try:
         payload = json.loads(raw)
-    except ValueError:
-        log(f"UNPARSEABLE payload let through: {raw[:200]!r}")
-        return 0
+        if not isinstance(payload, dict):
+            raise ValueError("the payload is not a JSON object")
+    except ValueError as e:
+        log(f"UNPARSEABLE payload — call blocked ({e}): {raw[:200]!r}")
+        print("GUARD[X1]: guard-მა ბრძანების აღწერა ვერ წაიკითხა (JSON დაზიანებულია) და გამოძახება გააჩერა. ეს ძრავის "
+              "შეცდომაა, არა შენი: ადამიანს უთხარი, ტერმინალი თავიდან გახსნას; თუ მეორდება — `.claude/hooks/guard.py` "
+              "ხელით უნდა შემოწმდეს.", file=sys.stderr)
+        return 2
     tool = payload.get("tool_name") or ""
     ti = payload.get("tool_input") or {}
     root = root_dir()
@@ -1432,10 +1442,12 @@ def main() -> int:
             return check_edit(tool, ti, payload, root)
         if tool in SHELL_TOOLS:
             return check_shell(str(ti.get("command") or ""), ps=tool == "PowerShell")
-    except Exception as e:  # a crash must be visible, and must not freeze the session
-        print(f"GUARD-ERROR: {type(e).__name__}: {e} — call let through", file=sys.stderr)
-        log(f"ERROR {type(e).__name__}: {e} on {tool}")
-        return 1
+    except Exception as e:  # a crash is visible and blocks the call — never a silent pass (ADR-0014)
+        print(f"GUARD[X2]: guard-ი ავარიულად გაჩერდა ({type(e).__name__}: {e}) და გამოძახება გააჩერა. ეს ძრავის შეცდომაა, "
+              "არა შენი: ადამიანს უთხარი — `.claude/hooks/guard.py` ხელით უნდა გასწორდეს, ან hook-ი დროებით გაითიშოს.",
+              file=sys.stderr)
+        log(f"ERROR {type(e).__name__}: {e} on {tool} — call blocked")
+        return 2
     return 0
 
 

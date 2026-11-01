@@ -1,8 +1,7 @@
 # AGENTS.md
 
-Instructions for any coding agent in this repository. Claude Code loads this file through `CLAUDE.md`;
-Codex and other tools read it directly. The owner does not read code: explain every result in plain
-Georgian, and let a machine check prove it — assurance is not evidence.
+Instructions for any coding agent (Claude Code loads it through `CLAUDE.md`). The owner does not read
+code: explain every result in plain Georgian, and let a machine check prove it — assurance is not evidence.
 
 ## What this project is
 
@@ -36,7 +35,7 @@ rule).
 | `tools/gates/` | deterministic gates (`gate.py`, `gates.toml`) and their drill |
 | `tools/observe.py` | the observatory: what agents did, read from Claude Code's transcripts (`/observatory`) |
 | `tools/cache_cost.py`, `tools/model_prices.toml` | what the sessions cost: prompt-cache use, rebuilds and their causes, at API list prices (ADR-0010) |
-| `.claude/hooks/statusline.py` | the status line: the owner's own line, the stage, when the prompt cache expires (ADR-0010, ADR-0011) |
+| `.claude/hooks/statusline.py` | the status line: the owner's line, the stage, the prompt cache's expiry (ADR-0010, ADR-0011) |
 | `.claude/hooks/firstrun.py` | the first session start in a new project: git repository, commit checks, tool check (ADR-0011) |
 | `.claude/agents/` | subagents: `spec-reviewer`, `verifier`, the three critic lenses, `refuter` |
 | `orchestration/` | maker–checker loops (stage 1: Claude only) — dormant (ADR-0005); the dispatcher of ADR-0009 is a decision only, its code is not in this template |
@@ -52,12 +51,13 @@ rule).
 4. Code, test-first, one task per commit, on a branch.
 5. Gates green: `gate.py` (Commands) exits 0.
 6. Review against `REVIEW.md`; its findings pass `tools/check_findings.py` (max 2 rounds).
-7. The owner sees the result working.
+7. The owner sees it working; after the pilot their `/approve live N` opens stage 6 — run and observe.
 
-These steps are `plan.md`'s stages F1–F5 (intent → spec → architecture ADR → plan and build → show).
+These steps are `plan.md`'s stages F1–F6 (intent → spec → architecture ADR → plan and build → show and pilot →
+run and observe; ADR-0013).
 `context_graph.py stage` reads the documents' statuses and names the current stage and the next
 step — it stores nothing and adds no stage of its own (ADR-0011). A new project starts from the person's idea,
-with no setup step: see CLAUDE.md.
+with no setup: see CLAUDE.md.
 
 Architectural choices are recorded as ADRs (`proposed`) and decided by the owner. **No agent approves
 anything.** An accepted ADR is binding; changing it means a new ADR that supersedes it.
@@ -74,14 +74,14 @@ bash .claude/hooks/py.sh tools/gates/drill.py          # break every check on pu
 bash .claude/hooks/py.sh tools/context_graph.py check  # links, frontmatter, statuses, approvals
 bash .claude/hooks/py.sh tools/context_graph.py query <id-or-stem>
 bash .claude/hooks/py.sh tools/context_graph.py pending  # waiting for the owner
-bash .claude/hooks/py.sh tools/context_graph.py stage  # the project's stage (F1–F5) and next step
+bash .claude/hooks/py.sh tools/context_graph.py stage  # the project's stage (F1–F6) and next step
 bash .claude/hooks/py.sh orchestration/run.py status
 ```
 
 ## Boundaries
 
 Never:
-- set an owner-only status (accepted / approved / rejected / superseded), run `tools/approve.py`, or write
+- set an owner-only status (accepted / approved / live / rejected / superseded), run `tools/approve.py`, or write
   `memory/approvals.md`;
 - edit another session's episode (only `needs_reconcile` / `reconciled_*`), or rewrite past log entries;
 - read `.env` or any secret; put a secret in code, logs, prompts or commits;

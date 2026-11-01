@@ -8,8 +8,8 @@ ONE argument) or by hand from a terminal:
     py -3.12 tools/approve.py "adr 0003"
 
 What it does, in order: find the document, check its preconditions (a spec needs an
-accepted intent, a plan needs an approved spec, a superseding ADR needs the old one
-accepted), change the status, write one row per change into memory/approvals.md,
+accepted intent, a plan needs an approved spec, a finished plan goes live only from `done`
+(`live 0001`, ADR-0013), a superseding ADR needs the old one accepted), change the status, write one row per change into memory/approvals.md,
 re-run the graph check on the touched files, and roll everything back if the check
 finds a new error. It always exits 0 and prints a Georgian result, because a non-zero
 exit would abort the /approve skill and hide the message from the owner.
@@ -44,6 +44,7 @@ USAGE = """გამოყენება:
   /approve intent                 intent.md → accepted
   /approve spec 0001              SPEC-0001 → approved   (საჭიროა: intent accepted)
   /approve plan 0001              PLAN-0001 → approved   (საჭიროა: მისი spec approved)
+  /approve live 0001              PLAN-0001 → live       (დასრულებული გეგმა ცოცხალშია: ნახე, გამოაქვეყნე, პილოტი ჩატარდა — ADR-0013)
   /approve adr 0001               ADR-0001 → accepted    (თუ supersedes აქვს, ძველი → superseded)
   /approve reject adr 0001 მიზეზი  ADR-0001 → rejected
   /approve budget 34000           ყოველ სესიაში ჩატვირთული ტექსტის ბიუჯეტი, ბაიტებში
@@ -111,6 +112,8 @@ def parse_args(raw: str) -> tuple[str, str, str, str]:
         return action, m.group(1), f"{int(m.group(2)):04d}", " ".join(toks[1:])
     if head == "intent":
         return action, "intent", "", " ".join(toks[1:])
+    if head in ("live", "ცოცხალია") and action == "approve" and len(toks) > 1 and toks[1].isdigit():
+        return "live", "plan", f"{int(toks[1]):04d}", " ".join(toks[2:])  # a finished plan goes live (ADR-0013)
     if head in ("adr", "spec", "plan") and len(toks) > 1 and toks[1].isdigit():
         return action, head, f"{int(toks[1]):04d}", " ".join(toks[2:])
     return "help", "", "", ""
@@ -141,6 +144,16 @@ def plan_changes(g: cg.Graph, action: str, doc: cg.Node) -> tuple[list[tuple[cg.
         if st != "proposed":
             return [], f"{doc.id} უკვე `{st}`-ია — უარყოფა მხოლოდ proposed ADR-ზე შეიძლება."
         return [(doc, "rejected")], None
+    if action == "live":  # the owner's word after the show and the pilot: done → live (ADR-0013)
+        if kind != "plan":
+            return [], "`live` მხოლოდ გეგმაზე მუშაობს — დასრულებული (`done`) გეგმა ცოცხალში გადის."
+        if st != "done":
+            return [], (f"{doc.id} არის `{st}` — ცოცხალში მხოლოდ დასრულებული (`done`) გეგმა გადის: ჯერ აგენტმა ყველა "
+                        "ამოცანა უნდა დაამთავროს და შედეგი გაჩვენოს.")
+        specs = related(g, doc, "spec")
+        if not specs or specs[0].status != "approved":
+            return [], f"ჯერ ამ გეგმის სპეციფიკაცია უნდა დამტკიცდეს: {specs[0].id if specs else '(ბმული აკლია)'}."
+        return [(doc, "live")], None
     if st not in FROM[kind]:
         return [], f"{doc.id} არის `{st}` — დამტკიცება შეიძლება მხოლოდ სტატუსიდან: {', '.join(sorted(FROM[kind]))}."
     if kind == "intent" and not cg.idea_written(g.root / doc.path):
@@ -275,7 +288,7 @@ def main(argv: list[str]) -> int:
         label = "intent.md" if kind == "intent" else f"{kind.upper()}-{num}"
         print(f"❌ {label} ვერ მოიძებნა (ან ერთზე მეტი ფაილი აქვს ერთი id).\n\n{list_pending(g)}")
         return 0
-    target = "rejected" if action == "reject" else TARGET[kind]
+    target = "rejected" if action == "reject" else "live" if action == "live" else TARGET[kind]
     if doc.status == target and target not in g.ledger.get(doc.id, []):
         # the owner changed the status by hand (e.g. in Obsidian): record it, change nothing else
         write_ledger(root, ledger_text(root), [ledger_row(doc.id, "(ხელით)", target, doc.path,
@@ -290,7 +303,7 @@ def main(argv: list[str]) -> int:
     if err:
         print(f"❌ {doc.id} — {err}")
         return 0
-    verb = "უარყოფილია" if action == "reject" else "დამტკიცდა"
+    verb = "უარყოფილია" if action == "reject" else "ცოცხალია — მე-6 ეტაპი" if action == "live" else "დამტკიცდა"
     lines = [f"✅ {doc.id} „{doc.title}“ — {doc.status} → {target} ({verb}). ჩაიწერა memory/approvals.md-ში."]
     for node, st in changes[1:]:
         lines.append(f"   {node.id} → {st} (ჩაანაცვლა {doc.id}).")

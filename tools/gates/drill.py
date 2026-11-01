@@ -209,6 +209,7 @@ def g_graph(tmp: Path, vault: Path) -> None:
         ("broken link", "intent.md", "[[plan]]", "[[no-such-note]]", "LINK-BROKEN"),
         ("id-only link gets a hint", "intent.md", "[[ADR-0001-demo]]", "[[ADR-0001]]", "use [[ADR-0001-demo]]"),
         ("illegal status", "docs/specs/SPEC-0001-demo.md", "status: draft", "status: done", "FM-STATUS"),
+        ("a plan set live without an owner ledger row (ADR-0013)", "docs/plans/PLAN-0001-demo.md", "status: draft", "status: live", "LEDGER"),
         ("unquoted wikilink in frontmatter", "docs/specs/SPEC-0001-demo.md", 'intent: "[[intent]]"', "intent: [[intent]]", "FM-PARSE"),
         ("accepted ADR without an owner ledger row", "docs/adr/ADR-0001-demo.md", "status: proposed", "status: accepted", "LEDGER"),
         # review M2: a link names a file inside the project — before 2026-10-19 the check looked these up on the disk
@@ -532,19 +533,24 @@ def g_graph_stage(tmp: Path, vault: Path) -> None:
     idea = (intent, "# Intent\n\n", "# Intent\n\n## 1. ხედვა\n\n_დაწერე შენი იდეა — აქ ჩაიწერება._\nსაცხობის საიტი\n\n"
                                     "## 2. მიზნები\n\n")
     cases = [
-        ("intent §1 is still the template", [empty_idea], "ეტაპი 1/5", "დაწერე შენი იდეა"),
-        ("intent draft with an idea", [], "ეტაპი 1/5", "/approve intent"),
-        ("intent draft — the builder check before the approval", [], "ეტაპი 1/5", "მშენებლის შემოწმება"),
-        ("the idea written under the template's §1 placeholder", [idea], "ეტაპი 1/5", "/approve intent"),
-        ("intent accepted, spec draft", [accepted], "ეტაპი 2/5", "/approve spec 0001"),
-        ("spec draft — the builder check before it is shown", [accepted], "ეტაპი 2/5", "მშენებლის შემოწმება"),
-        ("spec approved, the project's ADR proposed", [accepted, spec_ok], "ეტაპი 3/5", "/approve adr 0001"),
-        ("spec approved, only an engine ADR (scope: engine) proposed — not offered", [accepted, spec_ok, engine], "ეტაპი 3/5",
+        ("intent §1 is still the template", [empty_idea], "ეტაპი 1/6", "დაწერე შენი იდეა"),
+        ("intent draft with an idea", [], "ეტაპი 1/6", "/approve intent"),
+        ("intent draft — the builder check before the approval", [], "ეტაპი 1/6", "მშენებლის შემოწმება"),
+        ("the idea written under the template's §1 placeholder", [idea], "ეტაპი 1/6", "/approve intent"),
+        ("intent accepted, spec draft", [accepted], "ეტაპი 2/6", "/approve spec 0001"),
+        ("spec draft — the builder check before it is shown", [accepted], "ეტაპი 2/6", "მშენებლის შემოწმება"),
+        ("spec approved, the project's ADR proposed", [accepted, spec_ok], "ეტაპი 3/6", "/approve adr 0001"),
+        ("spec approved, only an engine ADR (scope: engine) proposed — not offered", [accepted, spec_ok, engine], "ეტაპი 3/6",
          "`/adr`-ით"),
-        ("project ADR accepted, plan draft", [accepted, spec_ok, adr_ok], "ეტაპი 4/5", "/approve plan 0001"),
-        ("plan approved", [accepted, spec_ok, adr_ok, (plan, "status: draft", "status: approved")], "ეტაპი 4/5",
+        ("project ADR accepted, plan draft", [accepted, spec_ok, adr_ok], "ეტაპი 4/6", "/approve plan 0001"),
+        ("plan approved", [accepted, spec_ok, adr_ok, (plan, "status: draft", "status: approved")], "ეტაპი 4/6",
          "PLAN-0001 მიმდინარეობს"),
-        ("plan done", [accepted, spec_ok, adr_ok, (plan, "status: draft", "status: done")], "ეტაპი 5/5", "PLAN-0001 დასრულებულია"),
+        ("plan done", [accepted, spec_ok, adr_ok, (plan, "status: draft", "status: done")], "ეტაპი 5/6", "PLAN-0001 დასრულებულია"),
+        # ADR-0013: the show and the pilot end with the owner's own word — the stage names it; a live plan is stage 6
+        ("plan done — the owner's next word is /approve live", [accepted, spec_ok, adr_ok, (plan, "status: draft", "status: done")],
+         "ეტაპი 5/6", "/approve live 0001"),
+        ("plan live (the owner said so) → run and observe", [accepted, spec_ok, adr_ok, (plan, "status: draft", "status: live")],
+         "ეტაპი 6/6", "PLAN-0001 ცოცხალშია"),
     ]
     for label, edits, want, detail in cases:
         v = fresh(tmp, f"stage-{abs(hash(label))}", vault)
@@ -584,7 +590,7 @@ def g_graph_stage(tmp: Path, vault: Path) -> None:
     for rel_ in (spec, plan):
         (v / rel_).unlink()
     rc, out, _ = py("tools/context_graph.py", "--root", str(v), "stage")
-    expect(rc == 0 and "ეტაპი 2/5" in out and "`/spec`" in out, "seeded: intent accepted, no spec yet → ეტაპი 2/5 (`/spec`)",
+    expect(rc == 0 and "ეტაპი 2/6" in out and "`/spec`" in out, "seeded: intent accepted, no spec yet → ეტაპი 2/6 (`/spec`)",
            out[:240])
     v = fresh(tmp, "stage-brief", vault)
     for rel_, old, new in (empty_idea, engine):
@@ -611,7 +617,7 @@ def g_graph_stage(tmp: Path, vault: Path) -> None:
     v = fresh(tmp, "stage-bad-bytes", vault)
     (v / intent).write_bytes((v / intent).read_bytes().replace(b"# Intent\n", b"# Intent\n\n## 1. \xe1\xe3\n\nsome \x93idea\x94\n"))
     rc, out, err = py("tools/context_graph.py", "--root", str(v), "stage")
-    expect(rc == 0 and "ეტაპი 1/5" in out, "seeded: intent.md holding bytes that are not UTF-8 (a cp1252 quote) → the "
+    expect(rc == 0 and "ეტაპი 1/6" in out, "seeded: intent.md holding bytes that are not UTF-8 (a cp1252 quote) → the "
            "stage is still read, no crash", (out + err)[-240:])
     v = fresh(tmp, "stage-scope", vault)
     edit(v / adr, "date: 2026-01-01\n", "date: 2026-01-01\nscope: engin\n")
@@ -744,18 +750,31 @@ def g_approve(tmp: Path, vault: Path) -> Path:
            "seeded: spec before an accepted intent is refused, nothing written", out[:160])
     out = approve(v, "intent")
     expect(out.startswith("✅") and status(v / "intent.md") == "accepted", "control: /approve intent → accepted", out[:160], kind="control")
-    expect("ეტაპი 2/5" in out and "/approve spec 0001" in out,
-           "seeded: after /approve intent the answer names the next stage (2/5) and its command", out[-200:])
+    expect("ეტაპი 2/6" in out and "/approve spec 0001" in out,
+           "seeded: after /approve intent the answer names the next stage (2/6) and its command", out[-200:])
     out = approve(v, "spec 1")
     expect(out.startswith("✅") and status(spec) == "approved", "control: /approve spec 1 → approved", out[:160], kind="control")
     out = approve(v, "plan 0001 drill note")
     expect(out.startswith("✅") and status(v / "docs/plans/PLAN-0001-demo.md") == "approved", "control: /approve plan → approved", out[:160], kind="control")
     out = approve(v, "adr 1")
     expect(out.startswith("✅") and status(v / "docs/adr/ADR-0001-demo.md") == "accepted", "control: /approve adr 1 → accepted", out[:160], kind="control")
-    expect("ეტაპი 4/5" in out and "PLAN-0001" in out,
-           "seeded: after the project's first ADR the answer moves on to building (4/5, PLAN-0001)", out[-200:])
+    expect("ეტაპი 4/6" in out and "PLAN-0001" in out,
+           "seeded: after the project's first ADR the answer moves on to building (4/6, PLAN-0001)", out[-200:])
     rc, gout, _ = graph_check(v)
     expect(rc == 0, "control: after owner approvals the graph (LEDGER, CHAIN) is clean", gout[-200:], kind="control")
+    # ADR-0013: done → live is the owner's word; it is refused before the plan is done and recorded like any approval.
+    # On a copy: the vault this group hands to the guard group keeps its approved plan.
+    lv = fresh(tmp, "approve-live", v)
+    plan_path = lv / "docs/plans/PLAN-0001-demo.md"
+    out = approve(lv, "live 0001")
+    expect(out.startswith("❌") and status(plan_path) == "approved", "seeded: `live` on a plan that is not done is refused, "
+           "nothing changes", out[:200])
+    edit(plan_path, "status: approved", "status: done")
+    out = approve(lv, "live 1 pilot over")
+    expect(out.startswith("✅") and status(plan_path) == "live" and "ეტაპი 6/6" in out,
+           "control: /approve live on a done plan → live, the answer names stage 6", out[-240:], kind="control")
+    rc, gout, _ = graph_check(lv)
+    expect(rc == 0, "control: a live plan with its ledger row keeps the graph clean", gout[-200:], kind="control")
     write(v / "docs/adr/ADR-0002-next.md", FM.format(
         body='id: ADR-0002\ntype: adr\ntitle: Next decision\nstatus: proposed\ndate: 2026-01-02\nsupersedes: "[[ADR-0001-demo]]"\n') + "# ADR-0002\n")
     edit(v / "docs/adr/README.md", "- [[ADR-0001-demo]]", "- [[ADR-0001-demo]]\n- [[ADR-0002-next]]")
@@ -768,7 +787,7 @@ def g_approve(tmp: Path, vault: Path) -> Path:
     write(v / "docs/adr/ADR-0003-maybe.md", FM.format(body="id: ADR-0003\ntype: adr\ntitle: Maybe\nstatus: proposed\ndate: 2026-01-03\n") + "# x\n")
     out = approve(v, "reject adr 3 not now")
     expect(out.startswith("✅") and status(v / "docs/adr/ADR-0003-maybe.md") == "rejected", "control: reject adr → rejected", out[:160], kind="control")
-    expect("➡ ახლა: ეტაპი 4/5" in out, "seeded: after a reject the answer still names where the project stands", out[-200:])
+    expect("➡ ახლა: ეტაპი 4/6" in out, "seeded: after a reject the answer still names where the project stands", out[-200:])
     out = approve(v, "adr 0001")
     expect(out.startswith("❌"), "seeded: approving an already superseded ADR is refused", out[:160])
     g_approve_stage_notes(tmp, vault)
@@ -926,14 +945,24 @@ def g_guard(tmp: Path, vault: Path, approved: Path, state: Path) -> None:
     touched = state / f"touched-{SID}"
     expect(touched.exists() and "SPEC-0009-draft.md" in touched.read_text(encoding="utf-8"),
            "records this session's edited files for the Stop gate", str(touched))
+    # ADR-0014 (2026-11-01): a guard that cannot read the call, or crashes inside a check, blocks it and says so — until
+    # then both let the call through, and L-020 was a session that ran with the guard silently off
     rc, out, err = py(".claude/hooks/guard.py", stdin="not json", env={"GUARD_ROOT": str(v), "GUARD_STATE_DIR": str(state)})
-    expect(rc == 0, "control: unparseable payload is let through (logged, by design)", f"rc={rc}", kind="control")
+    expect(rc == 2 and "GUARD[X1]" in err, "seeded: an unreadable payload → GUARD[X1], the call blocked (ADR-0014)",
+           f"rc={rc} {err.strip()[:120]}")
+    rc, out, err = py(".claude/hooks/guard.py", stdin="[1, 2]", env={"GUARD_ROOT": str(v), "GUARD_STATE_DIR": str(state)})
+    expect(rc == 2 and "GUARD[X1]" in err, "seeded: a payload that is JSON but not an object → GUARD[X1]",
+           f"rc={rc} {err.strip()[:120]}")
+    rc, err = guard(v, state, "Edit", "not-a-dict")  # a tool_input of the wrong shape: the checker raises inside
+    expect(rc == 2 and "GUARD[X2]" in err, "seeded: the checker crashes on a payload of the wrong shape → GUARD[X2], the "
+           "call blocked, the reason named", f"rc={rc} {err.strip()[:120]}")
 
     seeded = [
         ("G4", "spec draft → approved by the agent", "Edit", E(v / "docs/specs/SPEC-0009-draft.md", "status: draft", "status: approved")),
         ("G4", "new ADR written as accepted", "Write", {"file_path": str(v / "docs/adr/ADR-0005-x.md"),
                                                          "content": "---\nid: ADR-0005\ntype: adr\ntitle: x\nstatus: accepted\ndate: 2026-01-01\n---\n"}),
         ("G4", "draft plan → in-progress without approval", "Edit", E(v / "docs/plans/PLAN-0009-draft.md", "status: draft", "status: in-progress")),
+        ("G4", "approved plan → live by the agent (the owner's word alone, ADR-0013)", "Edit", E(plan, "status: approved", "status: live")),
         ("G5", "body edit of a decided (superseded) ADR", "Edit", E(adr, "Body.", "Changed body.")),
         ("G5", "reopen + body change in one edit", "Edit", E(spec, "status: approved", "status: draft\nnew_field: x")),
         ("G5", "rewrite a task in an approved plan", "Edit", E(plan, "first task", "a different task")),
@@ -4236,6 +4265,16 @@ def g_wiring(tmp: Path, vault: Path) -> None:
     asked = [r for r in perms.get("ask", []) if r.startswith("Bash(git ")]
     expect("Bash(git commit *--am*)" in asked and "Bash(git reset*)" in asked and "Bash(git rebase*)" in asked,
            "rewriting history asks the owner: commit --amend (and its abbreviation --am), reset, rebase", str(asked))
+    # ADR-0014: the gate files — the checks, their configuration and the drill itself — change only with the owner's
+    # yes; the ask rule is the machine form of that sentence (until 2026-11-01 it was prose alone, and the drill at
+    # commit cannot catch a change to drill.py)
+    gate_rules = [r for r in perms.get("ask", []) if "/tools/gates/**" in r]
+    expect("Edit(/tools/gates/**)" in gate_rules and "Write(/tools/gates/**)" in gate_rules,
+           "the gate files (tools/gates/**) ask the owner before an Edit or a Write (ADR-0014)", str(gate_rules))
+    guard_hooks = [h for m in hooks.get("PreToolUse", []) for h in m.get("hooks", []) if "guard.py" in h.get("command", "")]
+    expect(bool(guard_hooks) and all(h.get("onFailure") == "block" for h in guard_hooks),
+           "a guard that cannot start blocks the call: onFailure = block on its PreToolUse hook (ADR-0014; Claude Code "
+           "2.1.295+)", str(guard_hooks)[:160])
     for event in ("PostToolUse", "PostToolUseFailure"):  # a failed call reaches the model too (review 2026-10-22 H1)
         matchers = [m.get("matcher", "") for m in hooks.get(event, [])
                     if any("sentinel.py" in h.get("command", "") for h in m.get("hooks", []))]
@@ -4429,7 +4468,8 @@ def g_firstrun(tmp: Path) -> None:
     def first(root: Path, found: str | None = None, cwd: Path | None = None, **env: str | None) -> tuple[int, str]:
         """firstrun on a machine whose gitleaks search finds `found` (default: no gitleaks)."""
         rc, out, err = firstrun_with_gitleaks(found, {"GITLEAKS_BIN": None, "FIRSTRUN_ROOT": str(root),
-                                                      "GIT_CONFIG_GLOBAL": str(gcfg), "EPISODIC_NESTED": None, **env},
+                                                      "GIT_CONFIG_GLOBAL": str(gcfg), "EPISODIC_NESTED": None,
+                                                      "ENGINE_SANDBOX_STATE": None, **env},
                                               cwd=cwd)
         return rc, out + err
 
@@ -4467,9 +4507,26 @@ def g_firstrun(tmp: Path) -> None:
            "seeded: gitleaks missing → the agent is told, with the install command for the person's yes", out[-200:])
     expect("user.email" in out and "git config --local user.email" in out,
            "seeded: git knows no e-mail → the agent is told to ask the person and set it in this repository only", out[-200:])
+    expect("sandbox" in out and "sandbox და WSL2" in out,
+           "seeded: where Claude Code's sandbox stands is told at the first run, with the README part that explains it "
+           "(ADR-0014)", out[-240:])
     rc, out = first(p)
     expect(rc == 0 and out.strip() == "", "control: the next session start in the same project → silent (the missing tool "
            "was already reported once)", out[-200:], kind="control")
+    sb_none = project("fr-sandbox-none")
+    rc, out = first(sb_none, ENGINE_SANDBOX_STATE="none")
+    expect(rc == 0 and "Windows-ზე არ არსებობს" in out and "WSL2" in out,
+           "seeded: no sandbox on this system (native Windows) → said once, with WSL2 as the way to have one", out[-240:])
+    sb_off = project("fr-sandbox-off")
+    rc, out = first(sb_off, ENGINE_SANDBOX_STATE="off")
+    expect(rc == 0 and "გამორთულია" in out and "sandbox.enabled" in out,
+           "seeded: a system that has the sandbox, nothing switches it on → said once, with the setting for the "
+           "person's yes", out[-240:])
+    sb_on = project("fr-sandbox-on")
+    rc, out = first(sb_on, ENGINE_SANDBOX_STATE="on")
+    expect(rc == 0 and "git init" in out and "sandbox" not in out,
+           "control: the sandbox is on → nothing to say about it; the rest of the note unchanged", out[-200:],
+           kind="control")
     q = project("fr-unhooked")
     run(["git", "-C", str(q), "init", "-q"])
     rc, out = first(q)
@@ -4627,7 +4684,7 @@ def g_engine_statusline(tmp: Path) -> None:
     stage_vault = make_vault(tmp / "sl-vault")
     edit(stage_vault / "intent.md", "status: draft", "status: accepted")
     base_env = {"ENGINE_STATUSLINE_BASE": "", "CLAUDE_STATUSLINE_STATE_DIR": str(state), "CACHE_PRICES": str(prices),
-                "CONTEXT_ROOT": str(stage_vault)}
+                "CONTEXT_ROOT": str(stage_vault), "ENGINE_SANDBOX_STATE": None}
 
     def show(transcript: Path | None, sid: str = "sl-drill", stdin: str | None = None, cache: dict | None = None,
              cwd: Path | None = None, script: Path | None = None, **env: str) -> tuple[int, str]:
@@ -4644,14 +4701,62 @@ def g_engine_statusline(tmp: Path) -> None:
     expect(rc == 0 and "ქეში თბილია" in out and "❄" not in out, "control: asked 5 minutes ago on a 1-hour cache → warm",
            out[-160:], kind="control")
     lines = out.split("\n")
-    expect(rc == 0 and len(lines) >= 3 and "ეტაპი 2/5" in lines[1] and "/approve spec 0001" in lines[1] and "ქეში" in lines[2],
-           "seeded: the line under the owner's names the project's stage and the next command (2/5 → /approve spec 0001), "
+    expect(rc == 0 and len(lines) >= 3 and "ეტაპი 2/6" in lines[1] and "/approve spec 0001" in lines[1] and "ქეში" in lines[2],
+           "seeded: the line under the owner's names the project's stage and the next command (2/6 → /approve spec 0001), "
            "the cache line follows", out[-240:])
+    expect(rc == 0 and any("ქეში" in ln and "🛡 sandbox" in ln for ln in lines),
+           "seeded: the cache line ends with where the sandbox stands (🛡), read from the system and the settings "
+           "(ADR-0014)", out[-240:])
+    rc, out = show(sl_transcript(t / "sb-none.jsonl", 5, 4, 100_000), ENGINE_SANDBOX_STATE="none")
+    expect("🛡 sandbox არ არის — Windows" in out and "WSL2" in out,
+           "seeded: no sandbox on this system → '🛡 sandbox არ არის — Windows (WSL2-ში მუშაობს)'", out[-200:])
+    rc, out = show(sl_transcript(t / "sb-on.jsonl", 5, 4, 100_000), ENGINE_SANDBOX_STATE="on")
+    expect("🛡 sandbox ჩართულია" in out, "seeded: the settings switch the sandbox on → '🛡 sandbox ჩართულია'", out[-200:])
+    rc, out = show(sl_transcript(t / "sb-off.jsonl", 5, 4, 100_000), ENGINE_SANDBOX_STATE="off")
+    expect("🛡 sandbox გამორთულია" in out,
+           "seeded: a system that has the sandbox, nothing switches it on → '🛡 sandbox გამორთულია'", out[-200:])
+    # tools/sandbox_state.py reads the settings itself; --system makes the reading the same on every machine, and an
+    # empty home keeps the person's own settings out of it.
+    sb_home = tmp / "sb-home"
+    sb_home.mkdir()
+    sb_env = {"ENGINE_SANDBOX_STATE": None, "HOME": str(sb_home), "USERPROFILE": str(sb_home)}
+
+    def sandbox(root: Path, system: str) -> str:
+        rc, out, err = py("tools/sandbox_state.py", str(root), "--system", system, env=sb_env)
+        return (out + err).strip()
+
+    sb_on_root = tmp / "sb-settings-on"
+    write(sb_on_root / ".claude/settings.json", '{"sandbox": {"enabled": true}}')
+    sb_local_root = tmp / "sb-settings-local"
+    write(sb_local_root / ".claude/settings.json", '{"sandbox": {"enabled": true}}')
+    write(sb_local_root / ".claude/settings.local.json", '{"sandbox": {"enabled": false}}')
+    sb_bare_root = tmp / "sb-settings-none"
+    sb_bare_root.mkdir()
+    sb_broken_root = tmp / "sb-settings-broken"
+    write(sb_broken_root / ".claude/settings.json", '{"sandbox": {"enabled": tru')
+    got = sandbox(sb_bare_root, "Linux")
+    expect(got.startswith("off Linux"), "control: a system that has the sandbox, no settings anywhere → off", got[:80],
+           kind="control")
+    got = sandbox(sb_on_root, "Linux")
+    expect(got.startswith("on Linux") and "ჩართულია" in got, "seeded: sandbox.enabled true in the project's settings → on",
+           got[:80])
+    got = sandbox(sb_local_root, "macOS")
+    expect(got.startswith("off macOS"), "seeded: settings.local.json says off while settings.json says on → the local file "
+           "wins", got[:80])
+    got = sandbox(sb_on_root, "Windows")
+    expect(got.startswith("none Windows") and "WSL2" in got,
+           "seeded: native Windows → none even when the settings say on (there is nothing to switch on)", got[:80])
+    got = sandbox(sb_broken_root, "Linux")
+    expect(got.startswith("off Linux") and "Traceback" not in got,
+           "seeded: an unreadable settings.json → read as saying nothing (off), never a crash", got[:80])
+    write(sb_home / ".claude/settings.json", '{"sandbox": {"enabled": true}}')
+    got = sandbox(sb_bare_root, "Linux")
+    expect(got.startswith("on Linux"), "seeded: only the person's own settings switch it on → on", got[:80])
     odd_vault = fresh(tmp, "sl-odd-vault", stage_vault)
     hidden = ("\x1b[2K", chr(0x85), chr(0x202E), chr(0xE0041))  # the line's own colours are ESC sequences too
     edit(odd_vault / "docs/specs/SPEC-0001-demo.md", "id: SPEC-0001\n", "id: SPEC-0001" + "".join(hidden) + "X\n")
     rc, out = show(sl_transcript(t / "odd-id.jsonl", 5, 4, 100_000), CONTEXT_ROOT=str(odd_vault))
-    expect(rc == 0 and "ეტაპი 2/5" in out and "SPEC-0001[2KX" in out and not any(c in out for c in hidden),
+    expect(rc == 0 and "ეტაპი 2/6" in out and "SPEC-0001[2KX" in out and not any(c in out for c in hidden),
            "seeded: a spec id carrying an ANSI escape, a C1 control, a bidi override and a tag character → the stage "
            "line prints none of them (review S5)", repr(out[-200:]))
     rc, out = show(sl_transcript(t / "no-project.jsonl", 5, 4, 100_000), CONTEXT_ROOT=str(tmp / "sl-no-project"))
@@ -4731,6 +4836,9 @@ def g_engine_statusline(tmp: Path) -> None:
     expect(rc == 0 and "PLANTED" not in out and not marker.exists() and "Drill" in out,
            "seeded: a bash planted inside the project and reachable through PATH is refused — own line instead",
            out[-160:])
+    expect(rc == 0 and "sandbox: უცნობია" in out and "ქეში თბილია" in out,
+           "seeded: that copy has no tools/sandbox_state.py → the cache line says 'sandbox: უცნობია' with the cause, "
+           "never a silent omission (ADR-0014)", out[-200:])
     if os.name == "nt":
         wsl_sl = tmp / "sl-wsl" / "System32"
         write(wsl_sl / "bash.bat", "@echo WSL-SHIM\n@exit /b 1\n")

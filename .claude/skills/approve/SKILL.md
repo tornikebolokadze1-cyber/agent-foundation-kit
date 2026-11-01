@@ -1,15 +1,17 @@
 ---
 name: approve
-description: Owner-only. Approve (or reject) a project document — intent, spec, plan or ADR — or set the byte budget of the text every session loads, and record it in memory/approvals.md. Usage /approve [intent | spec N | plan N | adr N | reject adr N reason | budget N]; with no arguments it lists what is waiting for the owner.
+description: Owner-only. Approve (or reject) a project document — intent, spec, plan or ADR —, mark a finished plan live, or set the byte budget of the always-loaded text. Usage /approve [intent | spec N | plan N | live N | adr N | reject adr N reason | budget N]; no arguments lists what waits for the owner.
 disable-model-invocation: true
 allowed-tools: Bash(bash .claude/hooks/py.sh tools/approve.py *)
-argument-hint: "[intent | spec N | plan N | adr N | reject adr N <reason> | budget N]"
+argument-hint: "[intent | spec N | plan N | live N | adr N | reject adr N <reason> | budget N]"
 ---
 
 # /approve — the owner's decision
 
 The owner has just run this command. The result below comes from `tools/approve.py`; it has ALREADY
-been applied (or refused). Nothing is waiting for you to approve.
+been applied (or refused). Nothing is waiting for you to approve. `live N` marks a finished (`done`) plan
+live — the person saw it working, published it and the pilot is over — and moves the project to stage 6,
+run and observe (ADR-0013).
 
 Result:
 

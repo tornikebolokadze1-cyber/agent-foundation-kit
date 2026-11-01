@@ -82,6 +82,8 @@
       "Write(/.githooks/**)",
       "Edit(/tools/**)",
       "Write(/tools/**)",
+      "Edit(/tools/gates/**)",
+      "Write(/tools/gates/**)",
       "Edit(/.claude/skills/**)",
       "Write(/.claude/skills/**)",
       "Edit(/.claude/agents/**)",
@@ -252,7 +254,8 @@
           {
             "type": "command",
             "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/py.sh\" .claude/hooks/guard.py",
-            "timeout": 20
+            "timeout": 20,
+            "onFailure": "block"
           }
         ]
       }

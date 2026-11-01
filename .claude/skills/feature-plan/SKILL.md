@@ -53,4 +53,7 @@ missing. (`approve.py` refuses a plan on an unapproved spec, and the CHAIN-PLAN 
    → stop, reopen the plan (status only → draft) and ask the owner.
 5. Done = every task ticked, every gate green, the `verifier` subagent returns `VERDICT: pass`.
    Then set `status: done` and update `plan.md` / `progress.md` (or run `/session-close`), and show the
-   result the way `docs/guides/<kind>.md` §4 describes.
+   result the way `docs/guides/<kind>.md` §4 describes — publishing and the pilot are the person's yes.
+6. `done` → `live` is the person's word alone: once they have seen it working and the pilot is over, they
+   run `/approve live NNNN` (stage 6 — run and observe: guide §6, the spec's §6 measures; ADR-0013). Never
+   set `live` yourself; a change after that is a new `/spec`, never a reopened plan.

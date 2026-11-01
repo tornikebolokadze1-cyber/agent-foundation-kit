@@ -24,6 +24,13 @@ comes first (a spec cannot be approved before that — `approve.py` refuses and 
    a beginner to judge: about 5–8 requirements and at most ~10 acceptance criteria; ask a missing fact in
    the chat (one question per message) rather than piling up open questions — at most 3 stay in the file.
    Describe what the result does, not how it is built: the stack is decided at stage 3.
+   **Success measures (§6, ADR-0013).** Ask the person, in plain words, „რით გავიგებთ, რომ მუშაობს?“ — one
+   question, 2–3 options with your recommendation (answers right on a sample, speed, cost per request, no
+   wrong price on the page…) — and write the answer as 2–4 measures `M-NNN`, each with a threshold, where it
+   is measured (a test, an eval set in `evals/`, a gate) and when (every change; weekly at stage 6). For an
+   AI product these thresholds are the level-2 eval gates' contract (`evals-georgian`, `evals-grounding`):
+   the gates are switched on at stage 4 with the person's yes and their thresholds never go down; the eval
+   set is written with the spec, not after the code.
 4. **Index** — add a row to `docs/specs/README.md` (wikilink to the file). When complete, set
    `status: review`.
 5. **Review** — run the `spec-reviewer` subagent on the file. Fix critical/high findings; record the
