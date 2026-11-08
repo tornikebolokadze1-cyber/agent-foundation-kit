@@ -2,7 +2,8 @@
 id: GUIDE-game
 type: guide
 title: თამაშის პროექტის სახელმძღვანელო
-updated: 2026-10-11
+updated: 2026-11-08
+code: [game]
 ---
 
 # თამაშის პროექტის სახელმძღვანელო

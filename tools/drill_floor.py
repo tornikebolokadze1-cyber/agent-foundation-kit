@@ -6,9 +6,13 @@
 than the floor (a case was removed, or a group stopped running) and when it holds more (the floor rises with the drill,
 in the same commit); a floor below the last commit's needs the owner's own `/approve floor N` row in
 memory/approvals.md, written since that commit (LEDGER). A drill gate switched off, kept from the commit or removed arms
-no case, so it lowers the floor to 0. The guard's G7 refuses an edit that lowers, removes or switches off the floor.
+no case, so it lowers the floor to 0; once the owner's switch is committed, the floor written on that gate is what is
+held, at commit (gate.py) as in G7. The guard's G7 refuses an edit that lowers, removes or switches off
+the floor.
 A case is ARMED here or ELSEWHERE — a case only another system can run (Windows' admin shares, macOS and Linux file
 modes) — so the count is the same on Windows, macOS and Linux. The kit has no dispatcher, so its floor is its own.
+The drill gate is the one gate whose builtin is "drill" (is_drill) — one rule for gate.py and the guard; gate.py refuses
+a gates.toml with more than one.
 """
 from __future__ import annotations
 
@@ -28,13 +32,26 @@ def floor_of(gate: dict | None) -> int | None:
     return value if type(value) is int else None
 
 
-def drill_gate(text: str | None) -> dict | None:
-    """The table of the one drill gate in a gates.toml text, or None."""
+def is_drill(gate: object) -> bool:
+    """A drill gate: a [[gate]] table whose builtin is "drill" — the gate gate.py runs the drill for, whatever its id.
+    Found in use (2026-11-08): the floor used to be read from the gate whose id was "drill" while gate.py ran every builtin one, so a second
+    drill gate, or a renamed one, hid the last commit's floor and it went down unseen."""
+    return isinstance(gate, dict) and gate.get("builtin") == "drill"
+
+
+def drill_gates(text: str | None) -> list[dict]:
+    """Every drill gate of a gates.toml text ([] when it cannot be read)."""
     try:
         gates = tomllib.loads(text or "").get("gate", [])
     except tomllib.TOMLDecodeError:
-        return None
-    drills = [g for g in gates if isinstance(g, dict) and g.get("id") == "drill"]
+        return []
+    return [g for g in gates if is_drill(g)] if isinstance(gates, list) else []
+
+
+def drill_gate(text: str | None) -> dict | None:
+    """The table of the one drill gate in a gates.toml text, or None — none, or more than one (gate.py refuses
+    those)."""
+    drills = drill_gates(text)
     return drills[0] if len(drills) == 1 else None
 
 

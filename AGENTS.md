@@ -24,12 +24,12 @@ rule).
 | `plan.md` | roadmap: phases, current phase (auto block), backlog |
 | `progress.md` | "ახლა" (current state, auto block) + session log, newest first |
 | `process.md` | how we work: the path of every piece of work, who does what, where the owner decides |
-| `tasks/todo.md` | the agent's concrete tasks `D-NNN`: now · next (auto block) · waits for the owner · done |
+| `tasks/todo.md` | the agent's concrete tasks `D-NNN`: now · next (auto block) · queue · waits for the owner · done |
 | `docs/adr/` | architecture decisions `ADR-NNNN-slug.md` + index README |
 | `docs/specs/`, `docs/plans/` | feature specifications and implementation plans |
 | `docs/domain/` | verified domain facts, each dated and sourced |
 | `docs/guides/` | one guide per project type (`kind:` in intent.md — website, game, agent, automation, other): interview questions, stack options with their five commands, the first version, how to show it; the stage block names the part to use |
-| `memory/` | episodes, PROPOSALS, LESSONS, the owner's approvals ledger — map: `memory/README.md` |
+| `memory/` | episodes, PROPOSALS, LESSONS (an index; each lesson's story in `memory/lessons/`), the owner's approvals ledger — map: `memory/README.md` |
 | `tools/context_graph.py` | the knowledge graph: `build`, `check`, `query <id>`, `pending`, `stage` (where the project stands — ADR-0011) |
 | `tools/approve.py` | the owner's approval — never run it yourself |
 | `tools/gates/` | deterministic gates (`gate.py`, `gates.toml`) and their drill |

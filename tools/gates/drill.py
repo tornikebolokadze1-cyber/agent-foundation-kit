@@ -206,6 +206,14 @@ def edit(p: Path, old: str, new: str) -> None:
     p.write_text(t.replace(old, new, 1), encoding="utf-8", newline="\n")
 
 
+def set_block(p: Path, name: str, text: str) -> None:
+    """Replace what an `<!-- auto: name -->` block holds with text."""
+    t, count = re.subn(rf"(<!-- auto: {re.escape(name)}:start -->\n).*?(<!-- auto: {re.escape(name)}:end -->)",
+                       lambda m: m.group(1) + text + "\n" + m.group(2), p.read_text(encoding="utf-8"), count=1, flags=re.S)
+    assert count == 1, f"drill fixture: no {name} block in {p}"
+    p.write_text(t, encoding="utf-8", newline="\n")
+
+
 def floor_set(p: Path, n: int) -> Path:
     """A gates.toml whose drill floor is n — for a stand-in drill that holds n cases (ADR-0015)."""
     t, count = re.subn(r"(?m)^floor[ \t]*=[ \t]*[\d_]+", f"floor = {n}", p.read_text(encoding="utf-8"), count=1)
@@ -295,9 +303,42 @@ def g_graph(tmp: Path, vault: Path) -> None:
     rc, out = s15("A\ncompacts: 9\nneeds_reconcile: false")
     expect(rc == 0 and "CLEAN" in out, "set_field keeps a newline value on one line — no frontmatter injection (S15)", out[-160:])
     g_graph_schema(tmp, vault)
+    g_graph_lesson(tmp, vault)
     g_graph_spec(tmp, vault)
     g_graph_ledger(tmp, vault)
     g_graph_stage(tmp, vault)
+
+
+def g_graph_lesson(tmp: Path, vault: Path) -> None:
+    """ADR-0017: a lesson's story lives in its own file, a graph node of type `lesson`, so its frontmatter and links are
+    checked like any other note's; the index line in memory/LESSONS.md links to it."""
+    rel_ = "memory/lessons/L-001.md"
+    body = FM.format(body="id: L-001\ntype: lesson\ntitle: Drill lesson\nstatus: living\n") + "# L-001\n\nSee [[plan]].\n"
+    v = fresh(tmp, "graph-lesson", vault)
+    write(v / rel_, body)
+    edit(v / "intent.md", "[[plan]]", "[[plan]] [[L-001]]")
+    rc, out, _ = graph_check(v)
+    expect(rc == 0 and "GRAPH-CHECK OK" in out, "control: a lesson file with its id, type, title and status, and a link "
+           "to it, pass (ADR-0017)", f"rc={rc} out={out[-200:]!r}", kind="control")
+    cases = [
+        ("a lesson file that declares another type", "type: lesson", "type: memory", "FM-TYPE", "requires 'lesson'"),
+        ("a lesson file without its title", "title: Drill lesson\n", "", "FM-REQUIRED", "`title`"),
+        ("a lesson id that is not L-NNN", "id: L-001", "id: L-1", "FM-ID", "does not match"),
+        ("a lesson file named for another id", "id: L-001", "id: L-002", "FM-ID", "must start with its id"),
+        ("a lesson status other than living", "status: living", "status: draft", "FM-STATUS", "not valid for lesson"),
+        ("a broken link inside a lesson file", "[[plan]]", "[[no-such-lesson-link]]", "LINK-BROKEN", "no-such-lesson-link"),
+    ]
+    for i, (label, old, new, marker, detail) in enumerate(cases):
+        v = fresh(tmp, f"graph-lesson-{i}", vault)
+        write(v / rel_, body.replace(old, new, 1))
+        rc, out, _ = graph_check(v)
+        expect(rc == 1 and marker in out and detail in out, f"seeded: {label} → {marker} (ADR-0017)",
+               f"rc={rc} out={out[-200:]!r}")
+    v = fresh(tmp, "graph-lesson-gone", vault)
+    edit(v / "intent.md", "[[plan]]", "[[plan]] [[L-001]]")
+    rc, out, _ = graph_check(v)
+    expect(rc == 1 and "LINK-BROKEN" in out and "L-001" in out, "seeded: an index line links a lesson whose file is gone "
+           "→ LINK-BROKEN (ADR-0017)", f"rc={rc} out={out[-200:]!r}")
 
 
 def forge_ledger(v: Path, ident: str, change: str, rel: str, day: str = "2026-01-01") -> None:
@@ -1416,6 +1457,11 @@ def g_episodic(tmp: Path, vault: Path) -> None:
         "    pathlib.Path(os.environ['DRILL_STUB_ENV']).write_text(json.dumps({'key': 'OPENAI_API_KEY' in os.environ,"
         " 'claudecode': 'CLAUDECODE' in os.environ, 'plain': os.environ.get('DRILL_PLAIN_VAR'),"
         " 'nested': os.environ.get('EPISODIC_NESTED')}))\n"
+        "if os.environ.get('DRILL_STUB_WINDOW') and os.name == 'nt':\n"  # did the model's process get a window
+        "    import ctypes\n"
+        "    hwnd = ctypes.windll.kernel32.GetConsoleWindow()\n"
+        "    pathlib.Path(os.environ['DRILL_STUB_WINDOW']).write_text(json.dumps({'hwnd': int(hwnd or 0),"
+        " 'visible': bool(hwnd) and bool(ctypes.windll.user32.IsWindowVisible(hwnd))}))\n"
         "pathlib.Path(os.environ['DRILL_STUB_MARKER']).open('a').write('called\\n')\n"
         "time.sleep(float(os.environ.get('DRILL_STUB_DELAY') or 0))\n"
         # S8: a secret the summarizer model echoed — made here, since one in its environment would (rightly) not reach it
@@ -1425,7 +1471,8 @@ def g_episodic(tmp: Path, vault: Path) -> None:
         "qu = 'დრილის შეტყობინება 2: ' + 'ტექსტი ' * 3\n"
         "def cand(t): return {'text': t, 'verdict': 'new', 'compared': [], 'quote': qu}\n"
         "more = json.loads(os.environ.get('DRILL_STUB_MORE') or '{}')\n"
-        "print(json.dumps({'subtype': 'success', 'structured_output': {'title': 'DRILL-STUB-TITLE', 'done': ['x'],"
+        "print(json.dumps({'subtype': 'success', 'structured_output': {'title': more.get('title', 'DRILL-STUB-TITLE'),"
+        " 'done': ['x'] + more.get('done', []),"
         " 'decisions': more.get('decisions', []), 'open_questions': [], 'next_step': ('DRILL-NEXT ' + sec).strip(),"
         " 'proposals': [cand('DRILL-STUB-PROPOSAL')] + [cand(p) for p in extra] + more.get('proposals', []),"
         " 'lessons': more.get('lessons', [])}}))\n"))
@@ -1474,6 +1521,7 @@ def g_episodic(tmp: Path, vault: Path) -> None:
     expect(all(s in ctx for s in ("DRILL-STATE", "DRILL-PHASE", "DRILL-TODO"))
            and all(f"სრული ტექსტი `{n}`-შია" in ctx for n in ("progress.md", "plan.md", "tasks/todo.md")),
            "seeded: each long block keeps its start and names the file that holds it whole", ctx[-300:])
+    g_brief_caps(tmp, vault, state, stub_cmd, marker)
     # the facts are never cut, so none of them may grow without end: a project that never reconciles piles up sessions
     for n, label, kind in ((3, "a few sessions to reconcile → all named", "control"),
                            (30, "thirty sessions to reconcile → ten named, the rest counted and pointed to", "seeded")):
@@ -1531,10 +1579,11 @@ def g_episodic(tmp: Path, vault: Path) -> None:
 
     # SessionEnd without /session-close → detached child → summary, progress entry, proposal, reconcile flag
     t0 = time.time()
+    window = tmp / "stub-window.json"
     # the session's environment holds another service's key and Claude Code's own CLAUDECODE (D-060)
     rc, _, err = ep_cmd("end", {"session_id": SID, "reason": "prompt_input_exit", "transcript_path": str(tp)},
                         {"DRILL_STUB_ENV": str(stub_env), "OPENAI_API_KEY": "drill-not-a-real-key", "CLAUDECODE": "1",
-                         "DRILL_PLAIN_VAR": "1"})
+                         "DRILL_PLAIN_VAR": "1", "DRILL_STUB_WINDOW": str(window)})
     took = time.time() - t0
     at_return = ep.read_text(encoding="utf-8")
     expect(rc == 0 and took < MODEL_DELAY_S / 2 and "status: closed" in at_return,
@@ -1544,6 +1593,12 @@ def g_episodic(tmp: Path, vault: Path) -> None:
            "SessionEnd did not wait for the model: no summary yet when the hook returned (it runs detached)")
     ok = wait_for(lambda: "DRILL-STUB-TITLE" in ep.read_text(encoding="utf-8"))
     expect(ok, "detached child wrote the model summary into the episode after the hook returned")
+    if os.name == "nt":  # a console program started by a process with no console gets a window of its own unless told not to
+        shown = json.loads(read_settled(window)) if window.exists() else {}
+        expect(shown.get("visible") is False, "seeded: the detached summarizer starts its model call with no console "
+               "window of its own (Windows showed an empty black window for the whole summary)", str(shown or "no record"))
+    else:
+        elsewhere_cases(1, "episodic: the detached summarizer's model call opens no console window (Windows only)")
     sent = read_settled(stub_input) if stub_input.exists() else ""
     expect(bool(sent) and transcript_secret not in sent and "REDACTED:github-token]" in sent,
            "M7: a key in the transcript is hidden before the summarizer model is called, not only in its reply",
@@ -1594,15 +1649,30 @@ def g_episodic(tmp: Path, vault: Path) -> None:
     expect(calls_after == calls_before, "clean /session-close + nothing after it → no model call at SessionEnd",
            f"stub called {calls_after - calls_before}×")
 
-    # catch-up: an open episode idle for 7 h is closed and summarised at the next SessionStart
+    # catch-up: an open episode idle for 7 h — its session's transcript too — is closed and summarised at the next
+    # SessionStart. An episode is written only at start, compact and end, so a session that talks for hours with
+    # no compact has an old episode and a fresh transcript; it is live, and the same start leaves it open.
+    old = time.time() - 7 * 3600
+    tp_idle = write(tmp / "transcript-idle.jsonl", tp.read_text(encoding="utf-8"))  # not a session id: never "hookless"
+    os.utime(tp_idle, (old, old))
     ep3 = write(v / f"memory/episodes/EP-{TODAY}-{OTHER_SID[:8]}.md", FM.format(
         body=f'id: EP-{TODAY}-{OTHER_SID[:8]}\ntype: episode\ntitle: ""\nsession: {OTHER_SID}\ndate: {TODAY}\nstatus: open\n'
-             f'transcript: "{tp.as_posix()}"\nclosed_by: ""\nclosed_at: ""\nneeds_reconcile: false\n') + "# old\n")
-    old = time.time() - 7 * 3600
+             f'transcript: "{tp_idle.as_posix()}"\nclosed_by: ""\nclosed_at: ""\nneeds_reconcile: false\n') + "# old\n")
     os.utime(ep3, (old, old))
+    live_sid = "a11ce131-0000-4000-8000-000000000131"
+    tp_live = write(tmp / "transcript-live.jsonl", tp.read_text(encoding="utf-8"))
+    os.utime(tp_live, (time.time() - 60, time.time() - 60))  # the session said something a minute ago
+    ep_live = write(v / f"memory/episodes/EP-{TODAY}-{live_sid[:8]}.md", FM.format(
+        body=f'id: EP-{TODAY}-{live_sid[:8]}\ntype: episode\ntitle: ""\nsession: {live_sid}\ndate: {TODAY}\nstatus: open\n'
+             f'transcript: "{tp_live.as_posix()}"\nclosed_by: ""\nclosed_at: ""\nneeds_reconcile: false\n') + "# live\n")
+    os.utime(ep_live, (old, old))
     rc, out, _ = ep_cmd("start", {"session_id": "fe550000-0000-4000-8000-000000000004", "source": "startup"})
     expect("status: closed" in ep3.read_text(encoding="utf-8") and "catch-up" in ep3.read_text(encoding="utf-8"),
-           "catch-up: a 7 h idle open episode is closed at the next SessionStart")
+           "catch-up: a 7 h idle open episode whose transcript is 7 h idle too is closed at the next SessionStart")
+    live = read_settled(ep_live)
+    expect("status: open" in live and "catch-up" not in live, "seeded: an open episode 7 h old whose session's transcript "
+           "was written a minute ago is a live session — the catch-up leaves it open (it closed two on 2026-11-08)",
+           live[-200:])
     expect(wait_for(lambda: "DRILL-STUB-TITLE" in ep3.read_text(encoding="utf-8")), "catch-up: and summarised in the background")
     rc, out, _ = py(".claude/hooks/episodic.py", "status", SID, env=env)
     expect(f"EP-{TODAY}-{SID[:8]}.md" in out and "now_utc:" in out, "status command gives /session-close its facts", out[:160])
@@ -1611,7 +1681,7 @@ def g_episodic(tmp: Path, vault: Path) -> None:
     sid4 = "c1ea5000-0000-4000-8000-000000000005"
     ep4 = write(v / f"memory/episodes/EP-{TODAY}-{sid4[:8]}.md", FM.format(
         body=f'id: EP-{TODAY}-{sid4[:8]}\ntype: episode\ntitle: "closed, then went on"\nsession: {sid4}\ndate: {TODAY}\n'
-             f'status: open\ntranscript: "{tp.as_posix()}"\nclosed_by: session-close\n'
+             f'status: open\ntranscript: "{tp_idle.as_posix()}"\nclosed_by: session-close\n'
              f'closed_at: "{datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}"\nneeds_reconcile: false\n') + "# closed\n")
     os.utime(ep4, (old, old))
     calls_before = marker.read_text().count("called") if marker.exists() else 0
@@ -1631,6 +1701,376 @@ def g_episodic(tmp: Path, vault: Path) -> None:
     g_find_claude(tmp)
     g_episodic_intake(tmp, vault, stub_cmd, marker)
     g_shared_writes(tmp, vault)
+    g_unopened_links(tmp, vault, stub_cmd, marker)
+    g_busy_files(tmp, vault, stub_cmd, marker)
+    g_backup_line(tmp, vault)
+
+
+def g_brief_caps(tmp: Path, vault: Path, state: Path, stub_cmd: str, marker: Path) -> None:
+    """ADR-0017: each block of the brief has its own cap. A block over it is cut at it even when the brief has room, and
+    three blocks at their caps fit whole beside the longest facts — so a block kept under its cap is never cut."""
+    rc, out, _ = run([PY, "-c", "import sys, json; sys.path.insert(0, sys.argv[1] + '/.claude/hooks'); "
+                      "import episodic as e; print(json.dumps(e.BLOCK_CAPS))", str(CODE)])
+    caps = json.loads(out) if rc == 0 and out.strip().startswith("{") else {}
+    blocks = {"progress.md": ("current-state", "DRILL-STATE"), "plan.md": ("current-phase", "DRILL-PHASE"),
+              "tasks/todo.md": ("todo-now", "DRILL-TODO")}
+    if set(caps) != set(blocks) or not all(isinstance(n, int) and n > 0 for n in caps.values()):
+        record("INCONCL", f"episodic: the brief's block caps could not be read ({out[-120:]!r}) — ADR-0017 not drilled")
+        return
+
+    def sized(tag: str, n: int) -> str:
+        """Exactly n characters: the tag, then short dashboard lines (none of them a task line)."""
+        line, text = "- " + "ქართული დაფის ხაზი " * 4, tag
+        while len(text) + 1 + len(line) <= n:
+            text += "\n" + line
+        return text + "." * (n - len(text))
+
+    def brief(w: Path, sid: str) -> str:
+        rc, out, _ = py(".claude/hooks/episodic.py", "start", stdin=json.dumps({"session_id": sid, "source": "startup"}),
+                        env={**episode_env(w, state, stub_cmd, marker), "EPISODIC_AUTOSUMMARY": "0"})
+        return json.loads(out).get("hookSpecificOutput", {}).get("additionalContext", "") if out.strip().startswith("{") else ""
+
+    def shown(ctx: str, name: str) -> str:
+        return ctx.partition(f" — `{name}`\n\n")[2].split("\n\n### ")[0]
+
+    # the longest facts: the ↻ warning, thirty sessions to reconcile with long titles, and a last closed session whose
+    # engine line runs long (a session that changed many engine files)
+    w = fresh(tmp, "episodic-caps-fit", vault)
+    for name, (block, tag) in blocks.items():
+        set_block(w / name, block, sized(tag, caps[name]))
+    title = " ძალიან გრძელი სათაური" * 30
+    for i in range(30):
+        ended = "2026-01-02T09:00:00+04:00" if i == 29 else "2026-01-01T10:00:00+04:00"
+        write(w / f"memory/episodes/EP-2026-01-01-{i:08x}.md", FM.format(
+            body=f'id: EP-2026-01-01-{i:08x}\ntype: episode\ntitle: "r{i}{title}"\n'
+                 f'session: {i:08x}-0000-4000-8000-000000000000\n'
+                 'date: 2026-01-01\nstatus: closed\ncompacts: 0\nclosed_by: auto\nneeds_reconcile: true\n')
+            + f"# EP-2026-01-01-{i:08x}\n\n## დახურვა — {ended} (reason: `other`)\n"
+            + ("- ძრავა: 🔧 ძრავა შეიცვალა — " + "ძრავის ხელსაწყო drill_case.py, " * 40 + "\n" if i == 29 else ""))
+    # and the longest backup line: more commits than its threshold beside the copy, both names at their cap
+    limits = backup_limits()
+    long_branch = "b" * (limits[1] + 20) if limits else ""
+    if limits:
+        backup_repo(w, limits[0] + 1, long_branch)
+    sid = "9a1e0170-0000-4000-8000-000000000170"
+    write(state / f"compacts-{sid}", "12")
+    ctx = brief(w, sid)
+    facts = ctx.partition("\n\n### ახლა — ")[0]
+    longest = limits is None or (f"💾 ბექაფი: {limits[0] + 1} commit" in facts
+                                 and all(f"`{name[:limits[1] - 1]}…`" in facts for name in (long_branch,
+                                                                                            "origin/" + long_branch)))
+    expect("12 compact ამ სესიაში" in facts and "და კიდევ 20" in facts and "ბოლო დახურული სესიის ბოლოს" in facts
+           and longest and "მოჭრილია" not in ctx and len(ctx) <= 8_800
+           and all(shown(ctx, n) == sized(t, caps[n]) for n, (_, t) in blocks.items()),
+           "control: three blocks at their caps beside the longest facts — the backup line's longest among them "
+           "— go whole, with 200 characters to spare for the catch-up fact this fixture does not start "
+           "(ADR-0017)",
+           f"{len(ctx):,} characters, facts {len(facts):,}; cut: {'მოჭრილია' in ctx}; backup line: {longest}",
+           kind="control")
+    for i, (name, (block, tag)) in enumerate(blocks.items()):
+        w = fresh(tmp, f"episodic-cap-{block}", vault)
+        set_block(w / name, block, sized(tag, caps[name] + 600))
+        ctx = brief(w, f"9a1e0171-0000-4000-8000-00000000017{i}")
+        part = shown(ctx, name)
+        others = [n for n in blocks if n != name]
+        expect(part.startswith(tag) and len(part) <= caps[name] and f"სრული ტექსტი `{name}`-შია" in part
+               and all("მოჭრილია" not in shown(ctx, n) for n in others),
+               f"seeded: {name}'s block 600 characters over its cap, the others short → it alone is cut, at its cap of "
+               f"{caps[name]:,}, though the brief has room (ADR-0017)", f"{len(part):,} characters shown; {part[-120:]!r}")
+
+
+def backup_limits() -> tuple[int, int] | None:
+    """tools/backup_line.py's threshold and its cap on a name, or None when they cannot be read."""
+    rc, out, _ = run([PY, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import backup_line as b; "
+                      "print(b.UNPUSHED_MAX, b.NAME_CHARS)", str(CODE / "tools")])
+    nums = [int(x) for x in out.split() if x.isdigit()]
+    return (nums[0], nums[1]) if rc == 0 and len(nums) == 2 and 1 <= nums[0] <= 100 and nums[1] >= 8 else None
+
+
+def backup_repo(root: Path, ahead: int, branch: str = "main") -> Path:
+    """root made a repository whose branch is `ahead` commits beyond its uploaded copy — its upstream in a bare remote
+    beside it — for the backup line. -> the remote."""
+    bare = root.parent / f"{root.name}-remote.git"
+    run(["git", "init", "-q", "--bare", str(bare)])
+    git(root, "init", "-q", "-b", branch)
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "--allow-empty", "-m", "the work begins")
+    git(root, "remote", "add", "origin", str(bare))
+    git(root, "push", "-q", "-u", "origin", branch)
+    for i in range(ahead):
+        git(root, "commit", "-q", "--allow-empty", "-m", f"saved {i}")
+    return bare
+
+
+def g_backup_line(tmp: Path, vault: Path) -> None:
+    """One Georgian line, its own mark 💾, when the work is only on this computer — more commits than the
+    threshold that no remote copy holds, any such commit on a branch with no remote copy, or a project with no remote at
+    all. No network: git's last-seen copy of the remotes is what counts, and the line says when git last saw them. The
+    session's start brief carries it as a fact and `episodic.py status` hands it to /session-close."""
+    limits = backup_limits()
+    if limits is None:
+        record("INCONCL", "episodic: tools/backup_line.py's threshold could not be read — the backup line not drilled")
+        return
+    most, name_chars = limits
+    no_git = {"GIT_CEILING_DIRECTORIES": str(tmp)}  # a folder git cannot read stays one: no repository above it counts
+
+    def said(root: Path) -> tuple[int, str, str]:
+        rc, out, err = py("tools/backup_line.py", "--root", str(root), env=no_git)
+        return rc, out.strip(), err.strip()
+
+    def tracking(root: Path) -> str:
+        return run(["git", "-C", str(root), "for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes"])[1]
+
+    env = {"EPISODIC_STATE_DIR": str(tmp / "backup-state"), "EPISODIC_AUTOSUMMARY": "0", "EPISODIC_NESTED": None,
+           **no_git}
+
+    def status(root: Path, sid: str) -> str:
+        return py(".claude/hooks/episodic.py", "status", sid, env={**env, "EPISODIC_ROOT": str(root)})[1]
+
+    def start(root: Path, sid: str) -> str:
+        out = py(".claude/hooks/episodic.py", "start", stdin=json.dumps({"session_id": sid, "source": "startup"}),
+                 env={**env, "EPISODIC_ROOT": str(root)})[1]
+        try:
+            return str(json.loads(out)["hookSpecificOutput"]["additionalContext"])
+        except (ValueError, KeyError, TypeError):
+            return out
+
+    r = tmp / "backup-line"
+    r.mkdir()
+    bare = backup_repo(r, most)
+    seen, config = tracking(r), (r / ".git/config").read_bytes()  # before the line is ever asked for
+    rc, out, err = said(r)
+    expect(rc == 0 and out == "" and err == "", f"control: {most} commits beside the branch's copy — no more than the "
+           "threshold → no line, exit 0", f"rc={rc} {(out + err)[-200:]}", kind="control")
+    git(r, "commit", "-q", "--allow-empty", "-m", "one more")
+    git(r, "push", "-q", str(bare), "main:main")  # the remote now holds them all; pushed by path, git's copy stays old
+    rc, out, err = said(r)
+    expect(rc == 0 and out.startswith("💾 ბექაფი:") and f"{most + 1} commit მხოლოდ ამ კომპიუტერზეა" in out
+           and "`origin/main`" in out and "ბოლო fetch ან push — " in out and "ქსელით არ შემოწმებულა" in out
+           and tracking(r) == seen and (r / ".git/config").read_bytes() == config
+           and not (r / ".git/FETCH_HEAD").exists(),
+           f"seeded: {most + 1} commits the branch's copy does not hold → the line, its mark 💾, the count, the copy "
+           "and when git last saw the remote — with no network (the remote holds them all, git's copy of it is "
+           "unchanged, no fetch) and no git setting changed (L-005)", f"rc={rc} {(out + err)[-300:]}")
+    sid = "bac0e143-0000-4000-8000-000000000143"
+    out = status(r, sid)
+    expect(f"backup: 💾 ბექაფი: {most + 1} commit" in out, "seeded: /session-close's facts (`episodic.py status`) carry "
+           "the backup line", out[-240:])
+    ctx = start(r, sid)
+    expect(f"- 💾 ბექაფი: {most + 1} commit" in ctx and 'ატვირთვა — მხოლოდ მისი „კი"-თ' in ctx, "seeded: the session's "
+           "start brief carries it as a fact — tell the person in one sentence, upload only on their yes", ctx[:500])
+    plain = fresh(tmp, "backup-no-git", vault)
+    rc, out, err = said(plain)
+    expect(rc == 2 and "BACKUP-LINE INCONCLUSIVE" in err and out == "", "seeded: a folder git cannot read → exit 2, "
+           "INCONCLUSIVE, no line claimed", f"rc={rc} {(out + err)[-200:]}")
+    out = status(plain, sid)
+    expect("backup: INCONCLUSIVE" in out, "seeded: git could not say what is uploaded → `status` says INCONCLUSIVE, "
+           "never '-' (rules/23)", out[-240:])
+    ctx = start(plain, sid)
+    expect("- 💾 ბექაფი: ვერ შემოწმდა" in ctx, "seeded: and the start brief says the backup could not be checked — no "
+           "silence that would read as 'all uploaded'", ctx[:500])
+    git(r, "push", "-q", "origin", "main:other")  # by name: git's copy of `other` holds every commit of main
+    rc, out, err = said(r)
+    ctx = start(r, "bac1e143-0000-4000-8000-000000000143")
+    expect(rc == 0 and out == "" and "backup: -" in status(r, sid) and "💾" not in ctx, "control: the branch's own copy "
+           f"is {most + 1} commits behind, but another uploaded branch holds them all → nothing is only on this "
+           "computer: no line, `status` says backup: -, no fact in the brief", f"rc={rc} {(out + err)[-200:]}",
+           kind="control")
+    feature = "feature-" + "x" * name_chars
+    git(r, "checkout", "-q", "--no-track", "-b", feature)
+    git(r, "commit", "-q", "--allow-empty", "-m", "a new branch's work")
+    rc, out, err = said(r)
+    expect(rc == 0 and f"💾 ბექაფი: ბრანჩის `{feature[:name_chars - 1]}…` ატვირთული ასლი არ ჩანს — 1 commit მხოლოდ ამ "
+           "კომპიუტერზეა" in out and "ქსელით არ შემოწმებულა" in out, "seeded: a branch with no remote copy and one "
+           "commit no remote holds → 'no uploaded copy is seen', not silence (rules/23); its long name cut at the cap",
+           f"rc={rc} {(out + err)[-300:]}")
+    git(r, "checkout", "-q", "--detach")
+    rc, out, err = said(r)
+    expect(rc == 0 and "💾 ბექაფი: ამ commit-ის (detached HEAD) ატვირთული ასლი არ ჩანს — 1 commit" in out, "seeded: a "
+           "commit checked out with no branch (detached HEAD, as mid-rebase) → the line names the commit, not a branch",
+           f"rc={rc} {(out + err)[-300:]}")
+    git(r, "checkout", "-q", "--no-track", "-b", "work", "origin/other")
+    git(r, "branch", "-q", "--set-upstream-to=origin/other")
+    git(r, "commit", "-q", "--allow-empty", "-m", "work beside a copy of another name")
+    rc, out, err = said(r)
+    expect(rc == 0 and out == "", "control: a branch whose upstream has another name (`work` → origin/other), one "
+           "commit beyond it → that upstream is its copy: no line", f"rc={rc} {(out + err)[-200:]}", kind="control")
+    git(r, "checkout", "-q", "--no-track", "-b", "topic", "origin/other")
+    git(r, "commit", "-q", "--allow-empty", "-m", "topic, uploaded")
+    git(r, "push", "-q", "origin", "topic")  # no -u: a copy of the same name, and no upstream
+    git(r, "commit", "-q", "--allow-empty", "-m", "topic, one more")
+    rc, out, err = said(r)
+    expect(rc == 0 and out == "", "control: a branch pushed without -u (a copy of the same name, no upstream), one "
+           "commit beyond it → that copy is its copy: no line", f"rc={rc} {(out + err)[-200:]}", kind="control")
+    e = tmp / "backup-no-remote"
+    write(e / "note.md", "# note\n")
+    git(e, "init", "-q", "-b", "main")
+    rc, out, err = said(e)
+    expect(rc == 0 and out == "" and err == "", "control: a new repository before its first commit → nothing to back "
+           "up: no line, exit 0", f"rc={rc} {(out + err)[-200:]}", kind="control")
+    git(e, "add", "-A")
+    git(e, "commit", "-q", "-m", "the first save")
+    rc, out, err = said(e)
+    expect(rc == 0 and "💾 ბექაფი: ბრანჩის `main` ატვირთული ასლი არ ჩანს" in out
+           and "დისტანციური ასლი (remote) არ აქვს" in out and "1 commit მხოლოდ ამ კომპიუტერზეა" in out,
+           "seeded: a project with no remote at all (as firstrun.py leaves a new one) → 'no uploaded copy is seen', "
+           "with the reason", f"rc={rc} {(out + err)[-300:]}")
+
+
+def g_unopened_links(tmp: Path, vault: Path, stub_cmd: str, marker: Path) -> None:
+    """Found in use (2026-11-08): a compact summary goes into the episode word for word and a model writes the auto summary;
+    either may name a link that does not open in the project (an episode named a memory file outside the
+    repository). In an episode no session may edit later (guard G3) that is a graph error for good, so such a link is
+    written as code; a link that opens stays a link."""
+    w = fresh(tmp, "unopened-links", vault)
+    state = tmp / "unopened-links-state"
+    state.mkdir()
+    env = {**episode_env(w, state, stub_cmd, marker), "DRILL_STUB_DELAY": "0"}
+    probe = write(tmp / "unopened_links_probe.py", (
+        "import json, pathlib, sys\n"
+        "sys.path.insert(0, sys.argv[1] + '/.claude/hooks')\n"
+        "import episodic as e\n"
+        "if sys.argv[3] == 'no-graph':\n"  # the project's notes cannot be read
+        "    def refuse(root):\n"
+        "        raise OSError(13, 'refused (drill)')\n"
+        "    e.load_graph = refuse\n"
+        "e.record_compact(e.root_dir(), json.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8')), 'drill')\n"))
+
+    def compact(sid: str, summary: str, how: str = "-") -> tuple[str, int, str]:
+        """record_compact as the compact hook's child calls it; the episode's text and its graph check."""
+        pfile = write(state / f"compact-{sid[:8]}.json", json.dumps(
+            {"session_id": sid, "trigger": "auto", "compact_summary": summary}, ensure_ascii=False))
+        run([PY, str(probe), str(CODE), str(pfile), how], env=env, timeout=90)
+        rel = f"memory/episodes/EP-{TODAY}-{sid[:8]}.md"
+        rc, out, _ = graph_check(w, rel)
+        return (w / rel).read_text(encoding="utf-8") if (w / rel).exists() else "", rc, out
+
+    text, rc, out = compact("1c0d1320-0000-4000-8000-000000000132", "<summary>\nDRILL-D132 ნახე [[no-such-note]], "
+                            "[ფაილი](no-such.md) და [გარეთ](../../../outside.md). იხსნება: [[intent]] და "
+                            "[განზრახვა](../../intent.md); `[[in-code]]` კოდშია.\n</summary>")
+    gone = ("[[no-such-note]]", "[ფაილი](no-such.md)", "[გარეთ](../../../outside.md)")
+    expect(rc == 0 and all(f"`{s}`" in text for s in gone), "seeded: a compact summary naming a note that does not "
+           "exist, a missing file and one outside the project → each written as code; the episode passes the graph "
+           "check", f"rc={rc}; {out[-240:]}")
+    expect("[[intent]]" in text and "`[[intent]]`" not in text and "[განზრახვა](../../intent.md)" in text
+           and "`[განზრახვა]" not in text and "`[[in-code]]`" in text,
+           "control: in the same summary a link that opens stays a link, and code stays code", text[-300:], kind="control")
+    text, rc, out = compact("1c0d1321-0000-4000-8000-000000000133",
+                            "<summary>\n- DRILL-D132 შეიცვალა [`sys.argv[1]`](.claude/hooks/episodic.py)\n</summary>")
+    expect(rc == 0 and "- DRILL-D132 შეიცვალა `[sys.argv[1]](.claude/hooks/episodic.py)`" in text, "seeded: a link whose "
+           "text is code — [`file`](path), as models write it, here with brackets inside — that does not open from the "
+           "episode's folder → that link alone is written as code, the rest of the line stays as it was",
+           f"rc={rc}; {out[-240:]}")
+    text, rc, out = compact("1c0d1322-0000-4000-8000-000000000134",
+                            "<summary>\nDRILL-D132-SPLIT [a]`x`(no-such-split.md) ბოლო\n</summary>")
+    expect(rc == 0 and "`DRILL-D132-SPLIT [a]x(no-such-split.md) ბოლო`" in text, "seeded: a link the check reads only "
+           "once a code span is gone (`]` and `(` apart) → the whole line is written as code", f"rc={rc}; {out[-240:]}")
+    text, rc, out = compact("1c0d1323-0000-4000-8000-000000000135", "<summary>\nDRILL-D132-NOGRAPH [[intent]]\n</summary>",
+                            "no-graph")
+    logged = (state / "episodic.log").read_text(encoding="utf-8") if (state / "episodic.log").exists() else ""
+    expect("`[[intent]]`" in text and "could not be read" in logged, "seeded: the project's notes cannot be read → "
+           "every link in the summary is written as code, even one that would open, and the log says why", text[-200:])
+    # the auto summary: the episode (its title too), progress.md and PROPOSALS.md
+    sid = "1c0d1324-0000-4000-8000-000000000136"
+    tp = make_transcript(tmp / "transcript-unopened.jsonl", datetime.now().astimezone() - timedelta(minutes=30))
+    ep = closed_episode(w, sid, tp)
+    qu = "დრილის შეტყობინება 2: " + "ტექსტი " * 3
+    more = {"title": "DRILL-D132-TITLE [[no-such-title-note]]",
+            "done": ["DRILL-D132-DONE [[no-such-done-note]] და [ფაილი](no-such-done.md); იხსნება [[intent]]"],
+            "proposals": [{"text": "DRILL-D132-PROPOSAL [[no-such-proposal-note]]", "verdict": "new", "compared": [],
+                           "quote": qu}]}
+    pfile = write(state / f"payload-{sid[:8]}.json", json.dumps({"session_id": sid, "transcript_path": str(tp),
+                                                                "episode": str(ep)}))
+    py(".claude/hooks/episodic.py", "summarize", str(pfile), env={**env, "DRILL_STUB_MORE": json.dumps(more)})
+    rel = f"memory/episodes/{ep.name}"
+    rc, out, _ = graph_check(w, rel, "progress.md", "memory/PROPOSALS.md")
+    ep_text, prog, props = (read_settled(w / r) for r in (rel, "progress.md", "memory/PROPOSALS.md"))
+    expect(rc == 0 and "`[[no-such-done-note]]`" in ep_text and "`no-such-title-note`" in ep_text
+           and "`[[no-such-done-note]]`" in prog and "`[[no-such-proposal-note]]`" in props,
+           "seeded: a model summary naming notes and a file that do not exist → written as code in the episode (its "
+           "title too), progress.md and PROPOSALS.md; all three pass the graph check", f"rc={rc}; {out[-300:]}")
+    expect("[[intent]]" in ep_text and "`[[intent]]`" not in ep_text and f"[[{ep.stem}]]" in prog
+           and f"`[[{ep.stem}]]`" not in prog, "control: a link that opens stays a link in the summary, and so does "
+           "progress.md's link to the episode", prog[-300:], kind="control")
+
+
+def g_busy_files(tmp: Path, vault: Path, stub_cmd: str, marker: Path) -> None:
+    """Found in use (probe 2026-10-27): Windows refuses to open a file while another process replaces it, and refuses the
+    replace while another process holds the file open — 5,365 refused reads in 65,000 while a writer replaced one file,
+    3,681 refused replaces while a reader held it. A read refused at SessionStart ended the hook, so the session began
+    without its working memory; a refused replace lost the summary. Each is now tried again for up to two seconds; one
+    still refused after that goes up as before and leaves no temporary copy beside the file. A wrapper refuses the
+    first reads or replaces of one file, the way another process would, on every system."""
+    w = fresh(tmp, "busy-files", vault)
+    state = tmp / "busy-files-state"
+    state.mkdir()
+    env = {**episode_env(w, state, stub_cmd, marker), "DRILL_STUB_DELAY": "0"}
+    busy = [PY, str(write(tmp / "busy_files.py", (
+        "import os, pathlib, runpy, sys\n"
+        "name = os.environ['DRILL_BUSY']\n"
+        "left = {'read': int(os.environ.get('DRILL_BUSY_READS') or 0),"
+        " 'replace': int(os.environ.get('DRILL_BUSY_REPLACES') or 0)}\n"
+        "real_read, real_replace = pathlib.Path.read_text, os.replace\n"
+        "def read_text(self, *a, **kw):\n"
+        "    if self.name == name and left['read'] > 0:\n"
+        "        left['read'] -= 1\n"
+        "        raise PermissionError(13, 'being replaced by another process (drill)', str(self))\n"
+        "    return real_read(self, *a, **kw)\n"
+        "def replace(src, dst, **kw):\n"
+        "    if pathlib.Path(dst).name == name and left['replace'] > 0:\n"
+        "        left['replace'] -= 1\n"
+        "        raise PermissionError(13, 'held open by another process (drill)', str(dst))\n"
+        "    return real_replace(src, dst, **kw)\n"
+        "pathlib.Path.read_text, os.replace = read_text, replace\n"
+        "sys.argv = sys.argv[1:]\n"
+        "runpy.run_path(sys.argv[0], run_name='__main__')\n"))), str(CODE / ".claude/hooks/episodic.py")]
+
+    def logged() -> str:
+        return (state / "episodic.log").read_text(encoding="utf-8") if (state / "episodic.log").exists() else ""
+
+    def transcript(sid: str) -> Path:
+        return make_transcript(tmp / f"transcript-busy-{sid[:8]}.jsonl", datetime.now().astimezone() - timedelta(minutes=30))
+
+    last = closed_episode(w, "b05e0090-0000-4000-8000-000000000090", transcript("b05e0090"))
+
+    def start(sid: str, refused: int) -> tuple[int, str, str]:
+        rc, out, err = check([*busy, "start"], stdin=json.dumps({"session_id": sid, "source": "startup"}),
+                             env={**env, "DRILL_BUSY": last.name, "DRILL_BUSY_READS": str(refused)})
+        try:
+            brief = json.loads(out).get("hookSpecificOutput", {}).get("additionalContext", "")
+        except ValueError:
+            brief = ""
+        return rc, brief, err
+
+    def summarize(sid: str, refused: int) -> tuple[Path, int, str]:
+        tp = transcript(sid)
+        ep = closed_episode(w, sid, tp)
+        pfile = write(state / f"payload-{sid[:8]}.json", json.dumps({"session_id": sid, "transcript_path": str(tp),
+                                                                    "episode": str(ep)}))
+        rc, _, _ = check([*busy, "summarize", str(pfile)],
+                         env={**env, "DRILL_BUSY": ep.name, "DRILL_BUSY_REPLACES": str(refused)})
+        return ep, rc, read_settled(ep)
+
+    rc, brief, err = start("fe550901-0000-4000-8000-000000000901", 0)
+    expect(rc == 0 and f"[[{last.stem}]]" in brief, "control: the same wrapper refusing nothing → SessionStart brings "
+           "its working memory, the last closed session named", f"rc={rc}, brief {len(brief)} characters; {err[-200:]}",
+           kind="control")
+    rc, brief, err = start("fe550902-0000-4000-8000-000000000902", 2)
+    expect(rc == 0 and f"[[{last.stem}]]" in brief, "seeded: the first two reads of an episode refused (another process "
+           "is replacing it) → SessionStart tries again and still brings its working memory",
+           f"rc={rc}, brief {len(brief)} characters; {logged()[-240:]}")
+    ep, rc, text = summarize("b05e0091-0000-4000-8000-000000000091", 0)
+    expect("DRILL-STUB-TITLE" in text and "DRILL-NEXT" in text, "control: the same wrapper refusing nothing → the "
+           "summary lands in the episode", f"rc={rc}; {logged()[-240:]}", kind="control")
+    ep, rc, text = summarize("b05e0092-0000-4000-8000-000000000092", 2)
+    expect("DRILL-STUB-TITLE" in text and "DRILL-NEXT" in text, "seeded: the first two replaces of the episode refused "
+           "(another process holds it open) → tried again, the summary lands", f"rc={rc}; {logged()[-240:]}")
+    before = len(logged())
+    ep, rc, text = summarize("b05e0093-0000-4000-8000-000000000093", 10_000)
+    new, left = logged()[before:], sorted(p.name for p in ep.parent.glob(f".{ep.name}.*.tmp"))
+    expect(rc == 0 and "summarize FAILED: PermissionError" in new and ep.name in new and "DRILL-STUB-TITLE" not in text
+           and not left, "seeded: a replace still refused after two seconds → the error reaches the log as before, the "
+           "episode keeps its old text and no temporary copy is left beside it", f"rc={rc}, left: {left}; {new[-240:]}")
 
 
 def g_shared_writes(tmp: Path, vault: Path) -> None:
@@ -2320,6 +2760,7 @@ def g_catchup_refused(tmp: Path, v: Path, env: dict) -> None:
     # start picked up again (found in review, 2026-10-27)
     went_quiet = tmp / "transcripts-d081" / "went-quiet.jsonl"
     make_transcript(went_quiet, datetime.now().astimezone() - timedelta(hours=8))
+    os.utime(went_quiet, (old, old))  # the session went quiet: its transcript is as idle as its episode
     sid = "1d1e0082-0000-4000-8000-000000000082"
     idle = write(v / f"memory/episodes/EP-{TODAY}-{sid[:8]}.md", FM.format(
         body=f'id: EP-{TODAY}-{sid[:8]}\ntype: episode\ntitle: ""\nsession: {sid}\ndate: {TODAY}\nstatus: open\n'
@@ -3491,8 +3932,9 @@ FLOOR_ROW = "| 2026-11-07 10:00 +0400 | drill-floor | {old} → {new} | tools/ga
 def g_floor(tmp: Path, state: Path) -> None:
     """ADR-0015: the drill holds exactly `floor` cases (ARMED plus ELSEWHERE) — fewer is a case taken out or a group no
     longer run, more is a floor that did not rise with the drill. A floor below the last commit's needs the owner's own new
-    ledger row (LEDGER), and a drill gate switched off, kept from the commit or removed holds 0. The guard's G7 refuses the
-    edit that lowers it; only /approve floor N writes that row."""
+    ledger row (LEDGER), and a drill gate switched off, kept from the commit or removed holds 0 — once the owner's
+    switch is committed, the floor written on it is held. The guard's G7 refuses the edit that lowers it; only
+    /approve floor N writes that row."""
     print("== floor: the drill holds exactly its floor of cases; only the owner lowers it (gate, LEDGER, G7, /approve "
           "floor) ==")
     root = tmp / "floor"
@@ -3504,10 +3946,12 @@ def g_floor(tmp: Path, state: Path) -> None:
     git(root, "commit", "-q", "-m", "floor 5")
     stand_in, ran = write(tmp / "floor-drill.py", FLOOR_STAND_IN), tmp / "floor-drill-ran"
 
-    def gated(where: Path, gates: Path, last: str, *args: str) -> tuple[int, str, bool]:
-        """gate.py run in `where` with that gates.toml and the stand-in drill: (exit, output, whether the drill ran)."""
+    def gated(where: Path, gates: Path, last: str, *args: str, drill: Path | None = None) -> tuple[int, str, bool]:
+        """gate.py run in `where` with that gates.toml and the stand-in drill (or `drill`, a stand-in inside the project):
+        (exit, output, whether the drill ran)."""
         ran.unlink(missing_ok=True)
-        rc, out, err = check([PY, "-c", WITH_STAND_IN, str(CODE / "tools/gates"), str(stand_in), *(args or ("--only", "drill"))],
+        rc, out, err = check([PY, "-c", WITH_STAND_IN, str(CODE / "tools/gates"), str(drill or stand_in),
+                              *(args or ("--only", "drill"))],
                              env={"GATE_ROOT": str(where), "GATES_TOML": str(gates), "DRILL_LINE": last, "DRILL_RAN": str(ran)})
         return rc, out + err, ran.exists()
 
@@ -3567,6 +4011,100 @@ def g_floor(tmp: Path, state: Path) -> None:
     rc, out, did = gated(c, c / "tools/gates/gates.toml", line(4), "--only", "drill", "--pre-commit")
     expect(rc == 0 and "floor 4 held" in out and did, "control: the owner's row staged with it → PASS at commit", out[-240:],
            kind="control")
+
+    # At commit the drill gate is the one the commit records — its floor and whether it is on come from the staged
+    # gates.toml; and drill.py on disk that is not the commit's (cases not staged yet) stops the commit
+    def at_commit(name: str, floor: int, *add: str, own_drill: bool = False) -> tuple[Path, Path]:
+        """A copy of the floor project at commit: floor `floor` written on disk only, an engine file and `add` staged; with
+        own_drill, a stand-in drill.py in the last commit that grew by a case on disk. (the copy, its drill.py)"""
+        d = fresh(tmp, f"floor-at-commit-{name}", root)
+        script = d / "tools/gates/drill.py"
+        if own_drill:
+            write(script, FLOOR_STAND_IN)
+            git(d, "add", "tools/gates/drill.py")
+            git(d, "commit", "-q", "-m", "the drill")
+            write(script, FLOOR_STAND_IN + "# one case more\n")
+        write(d / "tools/gates/gates.toml", FLOOR_GATE.format(floor=floor))
+        write(d / "tools/engine.py", "x = 1\n")
+        git(d, "add", "tools/engine.py", *add)
+        return d, script
+
+    d, _ = at_commit("raised", 6)
+    rc, out, did = gated(d, d / "tools/gates/gates.toml", line(6), "--only", "drill", "--pre-commit")
+    expect(rc == 1 and "FLOOR: the drill grew to 6 cases, its floor is still 5" in out and did, "seeded: at commit, "
+           "a grown drill with its raised floor left unstaged → FLOOR (the commit records floor 5)", out[-240:])
+    git(d, "add", "tools/gates/gates.toml")
+    rc, out, did = gated(d, d / "tools/gates/gates.toml", line(6), "--only", "drill", "--pre-commit")
+    expect(rc == 0 and "floor 6 held" in out, "control: the raised floor staged with it → PASS", out[-240:],
+           kind="control")
+    d, _ = at_commit("lowered", 4)
+    rc, out, did = gated(d, d / "tools/gates/gates.toml", line(5), "--only", "drill", "--pre-commit")
+    expect(rc == 0 and "floor 5 held" in out, "control: a lower floor on disk that the commit leaves out → the "
+           "commit's floor 5 is held, no LEDGER", out[-240:], kind="control")
+    d, _ = at_commit("off", 5)
+    write(d / "tools/gates/gates.toml", FLOOR_GATE.format(floor=5).replace("enabled = true", "enabled = false"))
+    git(d, "add", "tools/gates/gates.toml")
+    write(d / "tools/gates/gates.toml", FLOOR_GATE.format(floor=5))
+    rc, out, did = gated(d, d / "tools/gates/gates.toml", line(5), "--only", "drill", "--pre-commit")
+    expect(rc == 1 and "the drill gate is switched off" in out and not did, "seeded: the drill gate switched off "
+           "in the commit while the disk keeps it on → FAIL, switched off (the gate the commit records)", out[-240:])
+    d, _ = at_commit("kept", 5)  # the reviewers' open case — the same with pre_commit = false
+    write(d / "tools/gates/gates.toml", FLOOR_GATE.format(floor=5).replace("pre_commit = true", "pre_commit = false"))
+    git(d, "add", "tools/gates/gates.toml")
+    write(d / "tools/gates/gates.toml", FLOOR_GATE.format(floor=5))
+    rc, out, did = gated(d, d / "tools/gates/gates.toml", line(5), "--only", "drill", "--pre-commit")
+    expect(rc == 1 and "no longer runs at commit" in out and not did, "seeded: the drill gate kept from the "
+           "commit (pre_commit = false) in the commit while the disk keeps it at commit → FAIL, no longer runs at "
+           "commit (the gate the commit records)", out[-240:])
+    d, script = at_commit("drill-on-disk", 6, own_drill=True)
+    rc, out, did = gated(d, d / "tools/gates/gates.toml", line(6), "--only", "drill", "--pre-commit", drill=script)
+    expect(rc == 2 and "DRILL-UNSTAGED: tools/gates/drill.py on disk is not what this commit records" in out
+           and not did, "seeded: drill.py grown on disk and its floor raised there, neither staged (perhaps "
+           "another session's work) → the commit stops before the drill runs: stage it, or wait (L-007); the disk's "
+           "cases no longer count", out[-240:])
+    d, script = at_commit("drill-staged", 6, "tools/gates/drill.py", own_drill=True)
+    rc, out, did = gated(d, d / "tools/gates/gates.toml", line(6), "--only", "drill", "--pre-commit", drill=script)
+    expect(rc == 1 and "FLOOR: the drill grew to 6 cases, its floor is still 5" in out and did, "seeded: the grown "
+           "drill.py staged (on disk and staged are one text), its raised floor not → FLOOR", out[-240:])
+    git(d, "add", "tools/gates/gates.toml")
+    rc, out, did = gated(d, d / "tools/gates/gates.toml", line(6), "--only", "drill", "--pre-commit", drill=script)
+    expect(rc == 0 and "floor 6 held" in out and did, "control: the grown drill.py and its raised floor both "
+           "staged → PASS", out[-240:], kind="control")
+    d = fresh(tmp, "floor-at-commit-text-only", root)
+    script = write(d / "tools/gates/drill.py", FLOOR_STAND_IN)
+    git(d, "add", "tools/gates/drill.py")
+    git(d, "commit", "-q", "-m", "the drill")
+    write(script, FLOOR_STAND_IN + "# changed on disk\n")
+    write(d / "notes.md", "x\n")
+    git(d, "add", "notes.md")
+    rc, out, did = gated(d, d / "tools/gates/gates.toml", line(5), "--only", "drill", "--pre-commit", drill=script)
+    expect(re.search(r"SKIP\s+drill", out) is not None and "DRILL-UNSTAGED" not in out and not did, "control: "
+           "drill.py changed on disk while only a text file is staged → the drill does not run at this commit (SKIP), "
+           "nothing stops it", out[-240:], kind="control")
+    # One rule finds the drill gate — the gate whose builtin is "drill", the one gate.py runs — for gate.py and
+    # the guard alike, and gate.py refuses a gates.toml with more than one: a second one hid the last commit's floor
+    for name, twin in (("same-id", "drill"), ("other-id", "drill-twin")):
+        d = fresh(tmp, f"floor-twins-{name}", root)
+        write(d / "tools/gates/gates.toml", FLOOR_GATE.format(floor=5) + "\n"
+              + FLOOR_GATE.format(floor=5).replace('id = "drill"', f'id = "{twin}"'))
+        write(d / "tools/engine.py", "x = 2\n")
+        git(d, "add", "tools/gates/gates.toml", "tools/engine.py")
+        rc, out, did = gated(d, d / "tools/gates/gates.toml", line(5), "--pre-commit")
+        expect(rc == 1 and "DRILLS: gates.toml has 2 drill gates" in out and not did, "seeded: a commit that "
+               f"records a second drill gate ({'the same id' if twin == 'drill' else 'another id'}) → FAIL, DRILLS, "
+               "before the drill runs", out[-240:])
+    renamed = fresh(tmp, "floor-renamed", root)
+    other_id = FLOOR_GATE.replace('id = "drill"', 'id = "the-drill"')
+    write(renamed / "tools/gates/gates.toml", other_id.format(floor=5))
+    git(renamed, "add", "tools/gates/gates.toml")
+    git(renamed, "commit", "-q", "-m", "the drill gate renamed")
+    rc, out, did = gated(renamed, variant("renamed-lower", other_id.format(floor=4)), line(4), "--only", "the-drill")
+    expect(rc == 1 and "LEDGER: the drill's floor went down from 5 to 4" in out and not did, "seeded: the "
+           "drill gate renamed in one commit and its floor lowered in the next → LEDGER: the drill gate is the one "
+           "that runs the drill, whatever its id", out[-240:])
+    rc, out, did = gated(root, variant("other-id", other_id.format(floor=5)), line(5), "--only", "the-drill")
+    expect(rc == 0 and "floor 5 held" in out and did, "control: the one drill gate under another id → its "
+           "floor is held: PASS", out[-240:], kind="control")
     rc, out, did = gated(root, variant("raise", FLOOR_GATE.format(floor=6)), line(6))
     expect(rc == 0 and "floor 6 held" in out, "control: the floor raised with the drill (6 of 6) → PASS, no owner row "
            "needed", out[-240:], kind="control")
@@ -3587,6 +4125,46 @@ def g_floor(tmp: Path, state: Path) -> None:
     expect("FAIL" not in out and re.search(r"SKIP\s+drill", out) is not None and not did, "control: the drill gate "
            "switched off after the owner's row `drill-floor 5 → 0` → SKIP, no FAIL", out[-240:], kind="control")
     write(ledger, base)
+    # Once the owner's switch is in the last commit (their row with it), the drill gate no longer ran at commit,
+    # so the floor written on it is what is held — written against written, as in G7: a later commit passes
+    # while that floor stands, lowering it needs the owner's new row, and taking the gate out still lowers it to 0
+    for name, how, switch in (("off", "switched off", ("enabled = true", "enabled = false")),
+                              ("kept", "kept from the commit", ("pre_commit = true", "pre_commit = false"))):
+        d = fresh(tmp, f"floor-owner-{name}", root)
+        write(d / "tools/gates/gates.toml", FLOOR_GATE.format(floor=5).replace(*switch))
+        write(d / "memory/approvals.md", base + FLOOR_ROW.format(old=5, new=0))
+        git(d, "add", "-A")
+        git(d, "commit", "-q", "-m", f"the owner: the drill gate {how}")
+        write(d / "notes.md", "a later commit\n")
+        git(d, "add", "notes.md")
+        rc, out, did = gated(d, d / "tools/gates/gates.toml", line(5), "--pre-commit")
+        expect(rc != 1 and re.search(r"FAIL\s+drill", out) is None and not did, "control: the drill gate "
+               f"{how} by the owner in the last commit, their row with it; an ordinary commit after it → no FAIL",
+               out[-240:], kind="control")
+        if name == "off":
+            rc, out, did = gated(d, d / "tools/gates/gates.toml", line(5))
+            expect(rc != 1 and re.search(r"FAIL\s+drill", out) is None and not did, "control: the same drill "
+                   "gate in a full run (not at commit) → no FAIL", out[-240:], kind="control")
+        write(d / "tools/gates/gates.toml", FLOOR_GATE.format(floor=4).replace(*switch))
+        git(d, "add", "tools/gates/gates.toml")
+        rc, out, did = gated(d, d / "tools/gates/gates.toml", line(4), "--pre-commit")
+        expect(rc == 1 and "LEDGER: the drill's floor went down from 5 to 4" in out and not did, "seeded: the "
+               f"floor written on a drill gate the owner {how} lowered to 4, no new owner row → FAIL, LEDGER names 4",
+               out[-240:])
+        if name == "off":
+            write(d / "tools/gates/gates.toml", gone.read_text(encoding="utf-8"))
+            git(d, "add", "tools/gates/gates.toml")
+            rc, out, did = gated(d, d / "tools/gates/gates.toml", line(5), "--pre-commit")
+            expect(rc == 1 and "the drill gate is gone from gates.toml" in out and "went down from 5 to 0" in out
+                   and not did, "seeded: a drill gate the owner switched off, then taken out of gates.toml → "
+                   "FAIL, LEDGER: its floor goes to 0 again", out[-240:])
+            write(d / "tools/gates/gates.toml", FLOOR_GATE.format(floor=4).replace(*switch))
+            git(d, "add", "tools/gates/gates.toml")
+        write(d / "memory/approvals.md", base + FLOOR_ROW.format(old=5, new=0) + FLOOR_ROW.format(old=5, new=4))
+        git(d, "add", "memory/approvals.md")
+        rc, out, did = gated(d, d / "tools/gates/gates.toml", line(4), "--pre-commit")
+        expect(rc != 1 and re.search(r"FAIL\s+drill", out) is None and not did, "control: the same lowered "
+               "floor with the owner's new row `drill-floor 5 → 4` staged → no FAIL", out[-240:], kind="control")
     first = tmp / "floor-first"
     write(first / "tools/gates/gates.toml", FLOOR_GATE.format(floor=5).replace("floor = 5\n", ""))
     git(first, "init", "-q", "-b", "main")
@@ -3609,9 +4187,28 @@ def g_floor(tmp: Path, state: Path) -> None:
                             ("the drill gate switched off", "Edit", E("enabled = true", "enabled = false")),
                             ("the drill gate kept from the commit", "Edit", E("pre_commit = true", "pre_commit = false")),
                             ("gates.toml rewritten with a lower floor (Write)", "Write",
-                             {"file_path": str(toml), "content": FLOOR_GATE.format(floor=3)})):
+                             {"file_path": str(toml), "content": FLOOR_GATE.format(floor=3)}),
+                            ("a second drill gate added under another id", "Edit",
+                             E('what = "drill"\n', 'what = "drill"\n\n'
+                               + FLOOR_GATE.format(floor=5).replace('id = "drill"', 'id = "drill-twin"')))):
         rc, err = guard(root, state, tool, ti)
         expect(rc == 2 and "GUARD[G7]" in err, f"seeded: {label} → GUARD[G7]", f"rc={rc} {err[-200:]}")
+    # A drill gate the owner has already switched off (or kept from the commit) holds its written floor — an edit
+    # of another line of it is no lowering, while lowering or taking out that floor still is
+    for name, how, switch in (("off", "switched off", ("enabled = true", "enabled = false")),
+                              ("kept", "kept from the commit", ("pre_commit = true", "pre_commit = false"))):
+        shut = write(tmp / f"floor-shut-{name}" / "tools/gates/gates.toml", FLOOR_GATE.format(floor=5).replace(*switch))
+        back = "switched back on" if name == "off" else "back at commit"  # the kept gate's cases too
+        cases = [("control", "another line changed", 'what = "drill"', 'what = "the drill"'),
+                 ("control", f"{back}, its floor kept", *switch[::-1]),
+                 ("seeded", "its written floor lowered", "floor = 5", "floor = 4"),
+                 ("seeded", "its floor line taken out", "floor = 5\n", "")]
+        for kind, label, old_text, new_text in cases:
+            rc, err = guard(shut.parents[2], state, "Edit",
+                            {"file_path": str(shut), "old_string": old_text, "new_string": new_text})
+            ok = rc == 0 if kind == "control" else rc == 2 and "GUARD[G7]" in err
+            expect(ok, f"{kind}: a drill gate already {how}, {label} → "
+                   f"{'allowed' if kind == 'control' else 'GUARD[G7]'}", f"rc={rc} {err[-200:]}", kind=kind)
 
     a = fresh(tmp, "floor-approve", root)
     rc, out, err = py("tools/approve.py", "floor 4 two cases moved to the kit", env={"APPROVE_ROOT": str(a)})
@@ -3812,6 +4409,28 @@ def owner_only_drift(skills: dict[str, str]) -> list[str]:
                    or any(REACHES_APPROVAL.search(cmd) for cmd in re.findall(r"!`([^`]*)`", text)))
         if (name in OWNER_ONLY_SKILLS or reaches) and not re.search(r"(?m)^disable-model-invocation:\s*true\s*$", fm):
             bad.append(name)
+    return bad
+
+
+GUIDE_CODE = re.compile(r"(?m)^code:\s*\[([^\]\n]*)\]\s*$")
+RULE_PATH = re.compile(r'(?m)^\s*-\s*"([^"\n]+)"\s*$')
+
+
+def code_rule_drift(guides: dict[str, str], rule: str) -> list[str]:
+    """The code rule (.claude/rules/code-and-tests.md — tests first, gates as done, stop when something breaks)
+    reaches the agent only through its `paths`. Every folder a project guide has the student's program built in — its
+    frontmatter's `code: [site, tests]` — must be there as `<folder>/**`; two lists for one thing drift apart (L-018).
+    A guide with no `code:` list would pass by naming nothing, so it is named too."""
+    fm = rule.split("\n---", 1)[0] if rule.startswith("---") else ""
+    reached = set(RULE_PATH.findall(fm))
+    bad = []
+    for name, text in sorted(guides.items()):
+        head = text.split("\n---", 1)[0] if text.startswith("---") else ""
+        m = GUIDE_CODE.search(head)
+        folders = [f.strip().strip("\"'") for f in m.group(1).split(",") if f.strip()] if m else []
+        if not folders:
+            bad.append(f"{name} (no code: list)")
+        bad += [f"{name}: {f}/**" for f in folders if f"{f}/**" not in reached]
     return bad
 
 
@@ -4850,6 +5469,22 @@ def g_wiring(tmp: Path, vault: Path) -> None:
              "---\n\n!`bash .claude/hooks/py.sh tools/approve.py adr 0001`\n"}
     expect("helper" in owner_only_drift(sneak), "seeded: a new skill that runs the approval script from a `!` line and "
            "the model may invoke → caught", str(owner_only_drift(sneak)))
+    guides = {g.stem: g.read_text(encoding="utf-8") for g in sorted((CODE / "docs/guides").glob("*.md"))}
+    code_rule = CODE / ".claude/rules/code-and-tests.md"
+    rule = code_rule.read_text(encoding="utf-8") if code_rule.is_file() else ""
+    gap = code_rule_drift(guides, rule)
+    expect(len(guides) >= 5 and not gap, f"control: the code rule (tests first, gates as done) reaches every folder "
+           f"the {len(guides)} project guides build code in — each guide's `code:` list is in the rule's `paths` "
+           "(L-018)", "; ".join(gap) or f"{len(guides)} guide(s)", kind="control")
+    grown = {**guides, "website": guides.get("website", "").replace("code: [site", "code: [site, bot", 1)}
+    expect("website: bot/**" in code_rule_drift(grown, rule), "seeded: a guide that builds code in a new folder (bot/) "
+           "the rule does not reach → named, guide and folder", str(code_rule_drift(grown, rule)))
+    unlisted = {**guides, "game": re.sub(r"(?m)^code:.*\n", "", guides.get("game", ""), count=1)}
+    expect("game (no code: list)" in code_rule_drift(unlisted, rule), "seeded: a guide with no `code:` list (it would "
+           "pass by naming nothing) → named", str(code_rule_drift(unlisted, rule)))
+    narrow = rule.replace('  - "site/**"\n', "", 1)
+    expect("website: site/**" in code_rule_drift(guides, narrow), "seeded: the rule without site/** (where the website "
+           "guide builds the student's site) → named", str(code_rule_drift(guides, narrow)))
     guard_hooks = [h for m in hooks.get("PreToolUse", []) for h in m.get("hooks", []) if "guard.py" in h.get("command", "")]
     expect(bool(guard_hooks) and all(h.get("onFailure") == "block" for h in guard_hooks),
            "a guard that cannot start blocks the call: onFailure = block on its PreToolUse hook (ADR-0014; Claude Code "

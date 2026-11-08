@@ -2,7 +2,8 @@
 id: GUIDE-website
 type: guide
 title: ვებსაიტის პროექტის სახელმძღვანელო
-updated: 2026-10-11
+updated: 2026-11-09
+code: [site, tests]
 ---
 
 # ვებსაიტის პროექტის სახელმძღვანელო

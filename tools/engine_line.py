@@ -38,6 +38,7 @@ WORDS = ((".claude/hooks/guard.py", "⚠ guard (უსაფრთხოებ�
          ("tools/gates/drill.py", "დრილი"), ("tools/gates/gate.py", "კარიბჭეების გამშვები"),
          ("tools/gates/README.md", "კარიბჭეების სახელმძღვანელო"), ("tools/gates/", "კარიბჭეები"),
          ("tools/drill_floor.py", "დრილის იატაკი"), ("tools/engine_line.py", "სესიის ბოლოს ხაზი"),
+         ("tools/backup_line.py", "ბექაფის შეხსენება"),
          ("tools/approve.py", "მფლობელის დამტკიცება (/approve)"), ("orchestration/", "ორკესტრაცია"))
 STATES = (("unchecked", "⚠ commit-შია, მაგრამ დრილს არ შეუმოწმებია"),
           ("pending", "ჯერ commit-ში არ არის (დრილი commit-ზე შეამოწმებს)"),

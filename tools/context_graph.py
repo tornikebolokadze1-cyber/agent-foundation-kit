@@ -69,6 +69,7 @@ PATH_TYPES: list[tuple[str, str]] = [
     ("docs/domain/*.md", "domain"),
     ("docs/guides/*.md", "guide"),
     ("memory/episodes/EP-*.md", "episode"),
+    ("memory/lessons/L-*.md", "lesson"),  # one lesson's story; its rule is its line in memory/LESSONS.md (ADR-0017)
 ]
 
 SCHEMA: dict[str, dict] = {
@@ -85,6 +86,7 @@ SCHEMA: dict[str, dict] = {
     "episode":  {"required": ("id", "type", "session", "date", "status"), "status": ("open", "closed")},
     "memory":   {"required": ("id", "type", "title", "status"), "status": ("living", "generated")},
     "guide":    {"required": ("id", "type", "title"), "status": None},
+    "lesson":   {"required": ("id", "type", "title", "status"), "status": ("living",)},
 }
 
 ID_PATTERNS = {
@@ -92,6 +94,7 @@ ID_PATTERNS = {
     "plan": r"PLAN-\d{4}",
     "adr": r"ADR-\d{4}",
     "episode": r"EP-\d{4}-\d{2}-\d{2}-[0-9a-z]{8}",
+    "lesson": r"L-\d{3,}",
 }
 
 # Statuses only the owner may set (through tools/approve.py, never an agent).
@@ -427,7 +430,7 @@ def _extract_body_links(text: str, body_line: int) -> list[Link]:
     for idx in range(body_line - 1, len(lines)):
         line = lines[idx]
         stripped = line.lstrip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
+        if _is_fence(stripped):
             marker = stripped[:3]
             if not in_fence:
                 in_fence, fence = True, marker
@@ -436,15 +439,93 @@ def _extract_body_links(text: str, body_line: int) -> list[Link]:
             continue
         if in_fence:
             continue
-        clean = INLINE_CODE_RE.sub("", line)
-        for m in WIKILINK_RE.finditer(clean):
-            out.append(Link(m.group(1).strip(), idx + 1, "link"))
-        for m in MDLINK_RE.finditer(clean):
-            tgt = m.group(1)
-            if re.match(r"^[a-z][a-z0-9+.-]*:", tgt, re.I) or tgt.startswith("#"):
-                continue  # URLs, mailto:, in-page anchors
-            out.append(Link("md:" + tgt, idx + 1, "link"))
+        out += _line_links(line, idx + 1)
     return out
+
+
+def _is_fence(stripped: str) -> bool:
+    return stripped.startswith("```") or stripped.startswith("~~~")
+
+
+def _line_links(line: str, line_no: int = 0) -> list[Link]:
+    """The links one line outside a fence holds, as the check reads them: code spans removed first."""
+    clean = INLINE_CODE_RE.sub("", line)
+    out = [Link(m.group(1).strip(), line_no, "link") for m in WIKILINK_RE.finditer(clean)]
+    for m in MDLINK_RE.finditer(clean):
+        tgt = m.group(1)
+        if _not_a_file(tgt):
+            continue  # URLs, mailto:, in-page anchors
+        out.append(Link("md:" + tgt, line_no, "link"))
+    return out
+
+
+def _not_a_file(target: str) -> bool:
+    return bool(re.match(r"^[a-z][a-z0-9+.-]*:", target, re.I)) or target.startswith("#")
+
+
+def unlink_unresolved(text: str, rel: str, g: Graph | None, *, value: bool = False) -> str:
+    """Text the engine writes into a knowledge file by itself — a compact summary, a model's summary — may name a link
+    that does not open in this project: a note that does not exist, a file outside it. In a file no session may edit
+    afterwards (another session's episode, guard G3) such a link would stay a graph error for good, so it is written as
+    code instead: the words stay, the check no longer reads them as a link. A link that opens stays a link;
+    fences and code spans stay as they are. `rel` is the file the text goes into, from the project root (a relative
+    link opens from its folder). With no graph — the notes could not be read — no link counts as opening.
+    `value=True`: a frontmatter value (an episode's title), where the check reads a wikilink even inside code — such a
+    link keeps only its words, as code."""
+    node = Node(path=rel)
+
+    def opens(target: str) -> bool:
+        if g is None:
+            return False
+        ln = Link(target, 0, "link")
+        _resolve(g, node, ln)
+        return ln.problem is None
+
+    def as_code(s: str) -> str:
+        return "`" + s.replace("`", "") + "`"
+
+    def closed(line: str) -> bool:
+        return all(opens(ln.target) for ln in _line_links(line))
+
+    if value:
+        words = WIKILINK_RE.sub(lambda m: m.group(0) if opens(m.group(1).strip()) else as_code(m.group(0).lstrip("!")[2:-2]),
+                                text)
+        shut = all(opens(m.group(1).strip()) for m in WIKILINK_RE.finditer(words))
+        return words if shut else as_code(re.sub(r"[\[\]]", "", text))  # brackets that meet again: none are left
+
+    def fix(line: str) -> str:
+        if closed(line):
+            return line
+        # Code spans masked, not removed, so each link keeps its place in the line — [`a.py`](a.py) is still found
+        mask = INLINE_CODE_RE.sub(lambda m: "x" * len(m.group(0)), line)
+
+        def target(m: re.Match) -> str:
+            return INLINE_CODE_RE.sub("", line[m.start(1):m.end(1)])
+
+        cuts = [m.span() for m in WIKILINK_RE.finditer(mask) if not opens(target(m).strip())]
+        cuts += [m.span() for m in MDLINK_RE.finditer(mask) if not _not_a_file(target(m)) and not opens("md:" + target(m))]
+        spans: list[list[int]] = []
+        for a, b in sorted(cuts):
+            if spans and a < spans[-1][1]:
+                spans[-1][1] = max(spans[-1][1], b)
+            else:
+                spans.append([a, b])
+        fixed = line
+        for a, b in reversed(spans):
+            fixed = fixed[:a] + as_code(fixed[a:b]) + fixed[b:]
+        # A link the check reads only once a code span is gone (`]` and `(` apart), or code spans that run together
+        # after the cut: the whole line becomes code — never a link that does not open
+        return fixed if closed(fixed) else as_code(line)
+
+    out, fence = [], ""
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if _is_fence(stripped):
+            fence = stripped[:3] if not fence else "" if stripped[:3] == fence else fence
+            out.append(line)
+        else:
+            out.append(line if fence else fix(line))
+    return "\n".join(out)
 
 
 def _frontmatter_links(fm: dict, text: str) -> list[Link]:
@@ -1141,7 +1222,7 @@ def context_map(g: Graph, issues: list[Issue]) -> str:
     if eng:
         lines += ["", "## ძრავის გადაწყვეტილებები (`scope: engine` — პროექტის ეტაპებს არ აჩერებს)", ""]
         lines += [f"- {n.id} — {n.title} (`{n.status}`) → `{approve_hint(n)}`" for n in eng]
-    for typ in ("intent", "roadmap", "progress", "spec", "plan", "adr", "domain", "memory", "episode"):
+    for typ in ("intent", "roadmap", "progress", "spec", "plan", "adr", "domain", "memory", "lesson", "episode"):
         group = sorted((n for n in g.nodes.values() if n.type == typ and not n.foreign), key=lambda n: n.path)
         if typ == "episode":
             group = group[-10:]
