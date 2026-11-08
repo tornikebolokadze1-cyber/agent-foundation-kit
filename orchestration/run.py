@@ -4,14 +4,18 @@
 
   bash .claude/hooks/py.sh orchestration/run.py status
   bash .claude/hooks/py.sh orchestration/run.py arch --topic "<question>" [--context FILE ...] [--dry-run]
-  bash .claude/hooks/py.sh orchestration/run.py code-check --plan PLAN-0001 --task T3 [--base main] [--dry-run]
+  bash .claude/hooks/py.sh orchestration/run.py code-check --plan PLAN-0001 --task T3 [--base main] [--response FILE] [--dry-run]
 
 Two stages (config.toml `stage`). Stage 1 runs Claude models only. Architecture loop (1 round
 per topic): Opus writes a proposal -> Sonnet audits it and states its own position -> Opus writes
 the final synthesis with an ADR draft (proposed). Code loop (max 2 rounds per task): the
 interactive session (Sonnet) writes the code; Opus reviews the diff against the spec and
 REVIEW.md and returns a VERDICT; tools/check_findings.py then checks each finding's place and quote,
-and one that does not check out is printed as not counting (meta.json `findings`). Stage 2 is the owner's decision and may name other providers,
+and one that does not check out is printed as not counting (meta.json `findings`). From round 2 the
+checker also reads its own review from the round before and the maker's response to it (--response FILE:
+per finding, fixed or rejected with a reason) and accounts for every earlier finding; a complete round whose
+review.md is gone stops the loop (PREVIOUS REVIEW) rather than let the checker judge from nothing.
+Stage 2 is the owner's decision and may name other providers,
 e.g. a ChatGPT checker through `codex exec -s read-only` (ChatGPT login, no API key).
 
 Every model is written provider:model. Each Claude step runs `claude -p --restricted` with
@@ -35,7 +39,7 @@ model read, goes to meta.json only (redacted).
 Exit: 0 ok · 1 a step failed (or GIT ERROR, RUNS) · 3 disabled · 4 round cap reached · 5 bad input or
 configuration, every message starting with its marker: CONFIG, STAGE GATE, MODEL SPEC, TOOLS,
 BUDGET CONFIG, LIMITS, SANDBOX, DENY RULES, TEMPLATE, ORCH_CLAUDE_CMD, TOPIC, CONTEXT, PLAN,
-BAD TASK, BAD BASE, NO DIFF, REVIEW CONTRACT. A dry run calls no model and writes nothing.
+BAD TASK, BAD BASE, NO DIFF, REVIEW CONTRACT, PREVIOUS REVIEW, RESPONSE. A dry run calls no model and writes nothing.
 
 Environment, for tests and the drill: ORCH_ROOT the project · ORCH_CONFIG config.toml ·
 ORCH_RUNS the run records · ORCH_SETTINGS the settings.json whose Read deny rules are passed on ·
@@ -93,8 +97,12 @@ TEMPLATES = {  # every template and the values run.py fills into it — checked 
     "architect-maker.md": {"nonce", "topic", "context_files"},
     "architect-checker.md": {"nonce", "topic", "context_files", "proposal"},
     "architect-synthesis.md": {"nonce", "topic", "proposal", "audit"},
-    "code-checker.md": {"nonce", "round", "max_rounds", "plan_id", "task", "task_text", "spec_text", "review_md", "diff"},
+    "code-checker.md": {"nonce", "round", "max_rounds", "plan_id", "task", "task_text", "spec_text", "review_md", "diff",
+                        "previous_review", "maker_response"},
 }
+MAX_EARLIER_CHARS = 20_000  # the previous review and the maker's response, each cut here (the diff has its own cap)
+ROUND_ONE = "(none — this is round 1)"
+NO_RESPONSE = "(none — the maker sent no response; judge each earlier finding from the diff alone)"
 NESTED_DENY = [f"Read({p})" for p in SECRET_KINDS]  # for every nested Claude call; .env.example falls under .env.*
 DENY_PROBLEM = ("DENY RULES — no Read deny rules in .claude/settings.json; a nested Claude call would see the secret "
                 "files")
@@ -150,7 +158,8 @@ def topic_key(text: str) -> str:
     return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:10]
 
 
-def records() -> list[dict]:
+def record_files() -> list[tuple[Path, dict]]:
+    """Every run record with the folder it lives in."""
     out = []
     for meta in sorted(RUNS.glob("*/meta.json")):
         try:
@@ -158,12 +167,41 @@ def records() -> list[dict]:
         except (OSError, ValueError):
             continue
         if isinstance(rec, dict):
-            out.append(rec)
+            out.append((meta.parent, rec))
     return out
+
+
+def records() -> list[dict]:
+    return [rec for _, rec in record_files()]
 
 
 def completed(loop: str, key: str) -> int:
     return sum(1 for r in records() if r.get("loop") == loop and r.get("key") == key and r.get("status") == "complete")
+
+
+def previous_review(key: str) -> tuple[Path, str]:
+    """The folder and the review.md of the latest complete code round of this task — what the next round answers to.
+    A complete round without a readable review stops the loop: a checker that cannot see what it asked for last time
+    would judge the task again from nothing, and the maker's fixes would meet new demands instead of an answer."""
+    done = [(folder, rec) for folder, rec in record_files()
+            if rec.get("loop") == "code" and rec.get("key") == key and rec.get("status") == "complete"]
+
+    def order(item: tuple[Path, dict]) -> tuple[int, str, str]:
+        folder, rec = item
+        rnd = rec.get("round")
+        return (rnd if isinstance(rnd, int) and not isinstance(rnd, bool) else 0, str(rec.get("finished") or ""), folder.name)
+
+    if not done:
+        raise Refused(f"PREVIOUS REVIEW — {key}: no complete earlier round in {shown(RUNS)}")
+    folder = max(done, key=order)[0]
+    try:
+        text = (folder / "review.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    if not text.strip():
+        raise Refused(f"PREVIOUS REVIEW — {folder.name}/review.md is missing, empty or unreadable: this round cannot see "
+                      "what the last one asked for. Restore the record, or let the owner decide the task (UNVERIFIED).")
+    return folder, text
 
 
 def program(name: str) -> str:
@@ -503,17 +541,22 @@ def cmd_status(_: argparse.Namespace) -> int:
 
 
 # ── architecture loop ─────────────────────────────────────────────────────────
+def project_file(raw: str, marker: str) -> Path:
+    """A file named on the command line that goes into a prompt: inside the project (after links are followed) and not
+    a secret file — otherwise a refusal that starts with `marker`."""
+    p = (ROOT / raw).resolve()
+    if not p.is_relative_to(ROOT) or not p.is_file():
+        raise Refused(f"{marker} — not a file inside the project: {raw}")
+    if is_secret_path(p.relative_to(ROOT).as_posix()):
+        raise Refused(f"{marker} — {p.relative_to(ROOT).as_posix()} is a secret file; it never goes into a prompt")
+    return p
+
+
 def context_files(extra: list[str]) -> list[Path]:
     files = [ROOT / "intent.md", ROOT / "REVIEW.md"]
     files += sorted((ROOT / "docs" / "domain").glob("*.md"))
     files += sorted((ROOT / "docs" / "adr").glob("ADR-*.md"))
-    for e in extra:
-        p = (ROOT / e).resolve()
-        if not p.is_relative_to(ROOT) or not p.is_file():
-            raise Refused(f"CONTEXT — not a file inside the project: {e}")
-        if is_secret_path(p.relative_to(ROOT).as_posix()):
-            raise Refused(f"CONTEXT — {p.relative_to(ROOT).as_posix()} is a secret file; it never goes into a prompt")
-        files.append(p)
+    files += [project_file(e, "CONTEXT") for e in extra]
     return [f for f in files if f.exists()]
 
 
@@ -617,6 +660,35 @@ def review_input(base: str, limit: int) -> tuple[str, list[str], bool]:
     return diff, left_out, truncated
 
 
+def capped(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit] + f"\n…(cut at {limit} characters)…\n"
+
+
+def earlier_round(key: str, rnd: int, response: str | None) -> tuple[dict[str, str], dict[str, str], str]:
+    """What this round answers to: the checker's own review from the round before and the maker's response
+    to it. Returns the prompt's values, what meta.json records of them, and the line that names them."""
+    if rnd == 1:
+        if response:
+            raise Refused("RESPONSE — round 1 has no earlier review to answer; send the maker's response from round 2 on")
+        return ({"previous_review": ROUND_ONE, "maker_response": ROUND_ONE}, {},
+                "previous review: none (round 1); maker response: none")
+    reply_file = project_file(response, "RESPONSE") if response else None
+    reply, rel = "", ""
+    if reply_file:
+        rel = reply_file.relative_to(ROOT).as_posix()
+        try:
+            reply = reply_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            raise Refused(f"RESPONSE — cannot read {rel} as UTF-8 text ({type(e).__name__})") from None
+        if not reply.strip():
+            raise Refused(f"RESPONSE — {rel} is empty")
+    folder, review = previous_review(key)
+    values = {"previous_review": capped(review, MAX_EARLIER_CHARS),
+              "maker_response": capped(reply, MAX_EARLIER_CHARS) if reply_file else NO_RESPONSE}
+    kept = {"previous_run": folder.name, **({"response": rel} if reply_file else {})}
+    return values, kept, f"previous review: {folder.name}/review.md ({len(review)} chars); maker response: {rel or 'none'}"
+
+
 def cmd_code_check(a: argparse.Namespace) -> int:
     if not TASK_RE.fullmatch(a.task or ""):
         raise Refused(f"BAD TASK — {a.task!r}: a task id is letters, digits, '.', '_' or '-', up to 32 characters (e.g. T3)")
@@ -633,15 +705,16 @@ def cmd_code_check(a: argparse.Namespace) -> int:
     if done >= code["max_rounds"]:
         raise Refused(f"ROUND CAP — {key}: უკვე {done} შემოწმება (ლიმიტი {code['max_rounds']}). "
                       "მესამე ბრუნი არ არის: ღია critical/high შენიშვნებზე გადაწყვეტს მფლობელი (UNVERIFIED).", EXIT_CAP)
+    rnd = done + 1
+    earlier, earlier_meta, earlier_line = earlier_round(key, rnd, a.response)
     diff, left_out, truncated = review_input(a.base, code["max_diff_chars"])
     specs = [g.nodes[ln.resolved] for ln in plan.links if ln.kind == "spec" and ln.resolved in g.nodes]
     spec_text = (ROOT / specs[0].path).read_text(encoding="utf-8") if specs else "(plan has no resolvable spec link)"
     review_path = ROOT / "REVIEW.md"
     if not review_path.exists():
         raise Refused("REVIEW CONTRACT — REVIEW.md is missing; the checker has no review contract — restore it first")
-    rnd = done + 1
     prompt = redact(fill("code-checker.md", {"task_text": task_line, "spec_text": spec_text,
-                                             "review_md": review_path.read_text(encoding="utf-8"), "diff": diff},
+                                             "review_md": review_path.read_text(encoding="utf-8"), "diff": diff, **earlier},
                          round=str(rnd), max_rounds=str(code["max_rounds"]), plan_id=plan_id, task=a.task))[0]
     base = f"{dt.date.today().isoformat()}-code-{slug(plan_id)}-{slug(a.task)}-r{rnd}"
     if a.dry_run:
@@ -651,14 +724,16 @@ def cmd_code_check(a: argparse.Namespace) -> int:
         print(dry_run_line(plan_step("checker", code["checker_model"], cfg, run_dir, "review"), deny))
         print(f"  prompt: {len(prompt)} chars; diff {len(diff)} chars{' (truncated)' if truncated else ''}"
               + (f"; secret files left out: {len(left_out)}" if left_out else ""))
+        print(f"  {earlier_line}")
         return 0
     run_id, run_dir = new_run(base)
     checker = plan_step("checker", code["checker_model"], cfg, run_dir, "review")
-    meta = {"id": run_id, "loop": "code", "key": key, "round": rnd, "stage": cfg["stage"], "status": "running",
-            "started": now(), "models": {"maker": code["maker_model"], "checker": code["checker_model"]}}
+    meta = {"id": run_id, "loop": "code", "key": key, "round": rnd, **earlier_meta, "stage": cfg["stage"],
+            "status": "running", "started": now(), "models": {"maker": code["maker_model"], "checker": code["checker_model"]}}
     if left_out:
         meta["left_out"] = left_out
     start_run(run_dir, meta, deny)
+    print(f"code-check {key}, round {rnd}/{code['max_rounds']} — {earlier_line}")
     try:
         review = run_recorded(checker, prompt, run_dir, meta, "review")
         verdict = final_label(review, "VERDICT", VERDICTS)
@@ -695,6 +770,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--plan", required=True)
     p.add_argument("--task", required=True)
     p.add_argument("--base", default="main")
+    p.add_argument("--response", help="from round 2: the maker's answer to the previous review, a file inside the project "
+                                      "(per finding: fixed, or rejected with a reason)")
     p.add_argument("--dry-run", action="store_true")
     a = ap.parse_args(argv)
     try:

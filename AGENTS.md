@@ -70,7 +70,7 @@ Work of three or more steps goes into `tasks/todo.md` first (`- [ ] D-NNN — wh
 ```bash
 # py.sh finds Python 3.12+ on Windows, macOS and Linux
 bash .claude/hooks/py.sh tools/gates/gate.py           # all gates: exit 0 pass / 1 fail / 2 inconclusive
-bash .claude/hooks/py.sh tools/gates/drill.py          # break every check on purpose; all must be ARMED
+bash .claude/hooks/py.sh tools/gates/drill.py          # break every check on purpose; 0 DEAD, floor held
 bash .claude/hooks/py.sh tools/context_graph.py check  # links, frontmatter, statuses, approvals
 bash .claude/hooks/py.sh tools/context_graph.py query <id-or-stem>
 bash .claude/hooks/py.sh tools/context_graph.py pending  # waiting for the owner

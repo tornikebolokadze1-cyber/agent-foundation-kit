@@ -80,6 +80,7 @@ sys.path.insert(0, str(CODE_ROOT / "tools"))
 import redact  # noqa: E402 — the summarizer is a model; its text is scrubbed of secrets before it reaches disk
 import claude_cli  # noqa: E402 — which claude, and what a nested session may inherit (shared with orchestration/run.py)
 from context_graph import parse_frontmatter, printable, set_field  # noqa: E402
+import engine_line  # noqa: E402 — the session-end line: which engine files changed, drilled or not (ADR-0015)
 
 WORKING_LINES = 60            # cap per injected block
 BRIEF_CHARS = 9_000           # cap on the whole brief: Claude Code keeps a hook text over ~10,000 characters in a file
@@ -101,6 +102,9 @@ FINGERPRINT_CHARS = 600       # start of the <summary> body that identifies one 
 LOCK_WAIT_S = float(os.environ.get("EPISODIC_LOCK_WAIT_S") or 30)  # a writer of progress.md / PROPOSALS.md waits
 LOCK_STALE_S = 300            # a lock this old was left by a writer that died
 CLOSE_HEADING_RE = re.compile(r"(?m)^## დახურვა — (\S+)")  # cmd_end's heading: when the session ended
+START_GIT_RE = re.compile(r"(?m)^- git: `[^`\n]*` @ `([^`\n]+)`")  # the first is ensure_episode's: where it began
+ENGINE_RE = re.compile(r"(?m)^- ძრავა: (.+)$")  # cmd_end's engine line (ADR-0015)
+ENGINE_FACT_CHARS = 400       # the engine line in the brief's facts; the episode keeps it whole
 
 # The intake contract: every proposal and lesson comes with a verdict, the ids it was compared with and a
 # quote the machine can find; every decision with a quote that tells whose decision it was.
@@ -589,16 +593,32 @@ def upsert_progress_entry(root: Path, ep_id: str, entry: str) -> bool:
         return held and write_progress_entry(p, ep_id, entry)
 
 
+AUTO_FLAG = "_(ავტო — გადასამოწმებელი)_"  # render_progress_entry's mark: what /session-close has not checked yet
+AFTER_CLOSE = "- დახურვის შემდეგ"
+
+
 def write_progress_entry(p: Path, ep_id: str, entry: str) -> bool:
     text = read(p)
     start_m, end_m = "<!-- auto: log:start -->", "<!-- auto: log:end -->"
     if start_m not in text or end_m not in text:
         log(f"progress.md has no auto log markers — entry for {ep_id} not written")
         return False
-    wrapped = f"<!-- ep:{ep_id}:start -->\n{entry.strip()}\n<!-- ep:{ep_id}:end -->"
-    old = re.compile(rf"<!-- ep:{re.escape(ep_id)}:start -->.*?<!-- ep:{re.escape(ep_id)}:end -->\n?", re.S)
-    text = old.sub("", text)
-    text = text.replace(start_m, f"{start_m}\n{wrapped}\n", 1)
+    old = re.compile(rf"<!-- ep:{re.escape(ep_id)}:start -->\n?(.*?)\n?<!-- ep:{re.escape(ep_id)}:end -->\n?", re.S)
+    m = old.search(text)
+    if m and AUTO_FLAG not in m.group(1).split("\n", 1)[0]:
+        # /session-close wrote this entry and the session went on: the summary of what came after the close is one line
+        # under it, never in its place (a real session lost its entry so); a later summary replaces
+        # only that line, and the entry keeps its place in the log
+        kept = [ln for ln in m.group(1).split("\n") if not ln.startswith(AFTER_CLOSE)]
+        head, *rest = entry.strip().split("\n")
+        said = " · ".join(ln.removeprefix("- ").strip() for ln in rest if ln.strip())
+        line = f"{AFTER_CLOSE}: {head.removeprefix('### ').strip()}" + (f" — {said}" if said else "")
+        body = "\n".join(kept + [line])
+        text = f"{text[:m.start()]}<!-- ep:{ep_id}:start -->\n{body}\n<!-- ep:{ep_id}:end -->\n{text[m.end():]}"
+    else:
+        wrapped = f"<!-- ep:{ep_id}:start -->\n{entry.strip()}\n<!-- ep:{ep_id}:end -->"
+        text = old.sub("", text)
+        text = text.replace(start_m, f"{start_m}\n{wrapped}\n", 1)
     text = set_field(text, "updated", dt.date.today().isoformat())
     write_atomic(p, text)
     return True
@@ -741,6 +761,7 @@ def cmd_start(payload: dict) -> int:
     last = max(closed, key=closed_when) if closed else None
     rec = reconcile_list(root)
     props = open_proposals(root)
+    engine = (ENGINE_RE.findall(read(last)) or [""])[-1] if last else ""
     facts = [
         f"- ეს სესია: `{f.relative_to(root).as_posix()}` — compact-ები: {compacts}" if f else "- ეპიზოდი ვერ შეიქმნა (იხ. episodic.log)",
         f"- ბოლო დახურული სესია: [[{last.stem}]] — {fm_get(read(last), 'title')[:FACT_CHARS] or 'უსათაურო'}" if last else "- ბოლო დახურული სესია: —",
@@ -751,6 +772,9 @@ def cmd_start(payload: dict) -> int:
         facts.append("- ⚠ გადასამოწმებელი (ავტომატურად შეჯამებული) სესიები: " + ", ".join(rec[:RECONCILE_SHOWN])
                      + (f" და კიდევ {more} (სრული სია — `memory/episodes/INDEX.md`, ⚠)" if more > 0 else "")
                      + " — `/session-close`-ის დროს შეადარე `plan.md`-ს და `progress.md`-ს")
+    if engine:
+        facts.append(f"- ბოლო დახურული სესიის ბოლოს: {clip(engine, ENGINE_FACT_CHARS)} — ერთი წინადადებით უთხარი "
+                     "მფლობელს (ADR-0015)")
     if started:
         facts.append(f"- ფონურად იწყება დაუხურავი სესიების შეჯამება: {', '.join(started)}")
     if compacts >= 3:
@@ -760,8 +784,10 @@ def cmd_start(payload: dict) -> int:
                                         ("დავალებები", "tasks/todo.md", tasks)])
     # The blocks and titles are text from files; a control or hidden character in them reaches the model as is
     # unless it is taken out here (review M7).
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": printable(ctx)}},
-                     ensure_ascii=False))
+    out = {"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": printable(ctx)}}
+    if engine and last and source in ("startup", "clear"):  # the person sees it, with no model in between
+        out["systemMessage"] = printable(f"ბოლო დახურული სესია ({last.stem}): {engine}")
+    print(json.dumps(out, ensure_ascii=False))
     return 0
 
 
@@ -915,6 +941,13 @@ def save_payload(payload: dict, tag: str) -> Path:
     return p
 
 
+def engine_now(root: Path, ep_text: str) -> str | None:
+    """This session's engine line (ADR-0015), measured from the commit its episode began at (`-`: before the first
+    commit; no such line: only what is not committed). "" — no engine file changed; None — git could not say."""
+    began = START_GIT_RE.search(ep_text)
+    return engine_line.line(root, "HEAD" if not began else None if began.group(1) == "-" else began.group(1))
+
+
 def cmd_end(payload: dict) -> int:
     root = root_dir()
     sid = payload.get("session_id") or ""
@@ -934,9 +967,13 @@ def cmd_end(payload: dict) -> int:
     head = git(root, "rev-parse", "--short", "HEAD") or "-"
     dirty = git(root, "status", "--porcelain")
     compacts = read_counter(sid)
+    engine = engine_now(root, text)
+    said = (f"- ძრავა: {engine}\n" if engine else "" if engine == "" or branch == "(no git)"
+            else "- ძრავა: ვერ შემოწმდა — git-მა ვერ თქვა, რა შეიცვალა\n")
     append(f, (f"\n## დახურვა — {iso()} (reason: `{payload.get('reason') or 'other'}`)\n\n"
                f"- ხანგრძლივობა: {dur} · compact-ები: {compacts}\n"
-               f"- git: `{branch}` @ `{head}`, დაუკომიტებელი ფაილები: {len(dirty.splitlines()) if dirty else 0}\n"))
+               f"- git: `{branch}` @ `{head}`, დაუკომიტებელი ფაილები: {len(dirty.splitlines()) if dirty else 0}\n"
+               + said))
     update_fields(f, status="closed", compacts=compacts)
     regen_index(root)
     pfile = save_payload({**payload, "episode": str(f)}, sid8(sid))
@@ -1250,6 +1287,8 @@ def cmd_status(sid: str) -> int:
     print(f"compacts: {read_counter(sid)}")
     print(f"needs_reconcile: {', '.join(reconcile_list(root)) or '-'}")
     print(f"open_proposals: {open_proposals(root)}")
+    engine = engine_now(root, read(f) if f and f.exists() else "")
+    print(f"engine: {'INCONCLUSIVE — git could not say what changed' if engine is None else engine or '-'}")
     return 0
 
 

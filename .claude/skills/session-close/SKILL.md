@@ -42,3 +42,6 @@ actually happened in this session — no plans presented as done.
 9. **Commit** — CHECKPOINT format (what was done / files / status), on the current branch.
 10. **Tell the owner** in 2–4 Georgian sentences: what was done, what is next, what waits for them.
     If compacts ≥ 3, recommend a new terminal or `/clear` now that everything is saved.
+    Then run `bash .claude/hooks/py.sh .claude/hooks/episodic.py status ${CLAUDE_SESSION_ID}` once more: unless its
+    `engine:` line is `-`, give that line to the owner word for word, on its own line — which engine files changed
+    and whether their commit passed the drill (ADR-0015).

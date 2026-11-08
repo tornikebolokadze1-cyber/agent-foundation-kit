@@ -27,10 +27,17 @@ Blocks with exit 2 (the reason goes to stderr, which Claude sees):
     G7  always-loaded text over its   an edit that makes what every session loads (CLAUDE.md and its imports,
         byte budget                   unscoped rules, skill and agent listings — tools/budget.py) grow past
                                       `max_bytes` of the budget gate; a shrinking edit always passes; raising
-                                      `max_bytes` in tools/gates/gates.toml is the owner's (`/approve budget N`)
+                                      `max_bytes` in tools/gates/gates.toml is the owner's (`/approve budget N`),
+                                      and so is lowering, removing or switching off the drill's `floor` there
+                                      (`/approve floor N`, ADR-0015 — the floor rises with the drill)
     G8  git's own configuration       .git/config (a worktree's, a submodule's): core.hooksPath and include.path
                                       live there — change it with `git config`, which asks the owner
-  A file outside the project still gets S2, G6, G8 and G1 (by its name); another name for the project folder
+    G9  a skill's or slash command's  a `!` line runs its command before the model sees the skill, and no hook sees it
+        unseen command                (L-004): a NEW one that the shell checks below would refuse (B1–B4, S1) is
+                                      refused when it is written, and so is a new allowed-tools entry naming the
+                                      approval script — in any .claude/…/skills/ or …/commands/ folder, this
+                                      project's, the user's or a plugin's; lines already there are not read again
+  A file outside the project still gets S2, G6, G8, G1 (by its name) and G9; another name for the project folder
   (//localhost/c$/…, //127.0.0.1/c$/…, a //?/C:/… long path) is read as the project itself.
   Bash | PowerShell
     B1  approve.py / approvals.md in a command that is not read-only
@@ -80,6 +87,7 @@ import os
 import re
 import shlex
 import sys
+from collections import Counter
 from pathlib import Path
 
 for _stream in (sys.stdin, sys.stdout, sys.stderr):
@@ -92,6 +100,7 @@ CODE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(CODE_ROOT / "tools"))
 from budget import GATES as BUDGET_FILE, always_loaded, budget, budget_in, import_closure, kind as loaded_kind  # noqa: E402
 from context_graph import OWNER_STATUSES, PENDING_STATUSES, status_of, type_for_path  # noqa: E402
+from drill_floor import floor_in, held_in  # noqa: E402
 from redact import MARKER_RE  # noqa: E402
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -134,6 +143,14 @@ FROZEN = {"intent": {"accepted"}, "spec": {"approved", "superseded"},
 REOPENABLE = {"intent": {"accepted"}, "spec": {"approved"}, "plan": {"approved", "in-progress", "done"}}
 PLAN_MOVES = {("approved", "in-progress"), ("in-progress", "done")}
 DEVIATIONS_HEADING = "## გადახრები"
+# G9: a skill or slash command — this project's, the user's (~/.claude/skills) or a plugin's. Matched without
+# regard to case: on Windows and macOS `.Claude/Skills` is the same folder.
+SKILL_FILE_RE = re.compile(r"(?:^|/)\.claude/(?:[^/]+/)*(?:skills|commands)/.+\.md$", re.IGNORECASE)
+# A `!` line: an inline !`…` (a longer run of backticks lets the command hold one) and a fenced block opened with `!`.
+# Read wider than Claude Code may read it — a span that runs nothing costs nothing here.
+BANG_INLINE_RE = re.compile(r"!(`+)(.+?)\1", re.S)
+BANG_FENCE_RE = re.compile(r"(?m)^[ \t]*(`{3,}|~{3,})[ \t]*![^\n]*\n(.*?)^[ \t]*\1", re.S)
+APPROVER_RE = re.compile(r"approve\.py|tools\.approve", re.IGNORECASE)  # the approval script, as B1 names it
 
 READ_ONLY_CMDS = {"cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "wc", "ls", "stat",
                   "file", "diff", "cmp", "md5sum", "sha1sum", "sha256sum", "bat", "jq", "sed",
@@ -353,6 +370,10 @@ def check_edit(tool: str, ti: dict, payload: dict, root: Path) -> int:
     if low == LEDGER or (rel is None and low.endswith("/" + LEDGER)):
         return block("G1", f"{LEDGER} ჩაწერა მხოლოდ მფლობელის `/approve`-ით შეიძლება (tools/approve.py) — ამ "
                            "პროექტში თუ მის სხვა ასლში. Only the owner's /approve writes the approval ledger.")
+    if SKILL_FILE_RE.search(where):
+        unseen = check_skill(tool, ti, root / rel if rel is not None else resolved(path, payload.get("cwd"), root), where)
+        if unseen:
+            return unseen
     if rel is None:
         return 0
     if low == EP_INDEX.lower():
@@ -388,6 +409,12 @@ def check_budget(tool: str, ti: dict, root: Path, rel: str) -> int:
             return block("G7", f"{rel}: ბიუჯეტს ({b0:,} ბაიტი ყოველთვის ჩატვირთულ ტექსტზე) მხოლოდ მფლობელი ზრდის ან "
                                "აუქმებს — `/approve budget <N>`. შემცირება შეიძლება; სხვა ცვლილებისთვის max_bytes "
                                "უცვლელი დატოვე.")
+        f0, f1 = floor_in(before or ""), held_in(after)  # a drill gate switched off holds 0: it arms no case
+        if f0 is not None and (f1 is None or f1 < f0):  # ADR-0015: the floor rises with the drill, the owner lowers it
+            return block("G7", f"{rel}: დრილის იატაკს ({f0:,} შემთხვევა) მხოლოდ მფლობელი წევს, აუქმებს ან თიშავს "
+                               "(გამორთული დრილი არც ერთ შემთხვევას არ ამოწმებს) — `/approve floor <N>`. აწევა შეიძლება "
+                               "(დრილთან ერთად); სხვა ცვლილებისთვის floor და დრილის gate უცვლელი დატოვე, ამოღებული "
+                               "შემთხვევა კი დრილში დააბრუნე.")
         return 0
     cap = budget(root)
     if cap is None:
@@ -419,6 +446,54 @@ def check_episode(tool: str, ti: dict, payload: dict, root: Path, rel: str) -> i
     return block("G3", f"{rel} სხვა სესიის ეპიზოდია — ისტორია მხოლოდ ემატება. შეგიძლია შეცვალო მხოლოდ "
                        f"{', '.join(sorted(FOREIGN_EPISODE_MUTABLE))}; ახალი ფაქტი ჩაწერე შენი სესიის ეპიზოდში "
                        "ან memory/LESSONS.md-ში.")
+
+
+def injected_commands(text: str) -> list[str]:
+    """The commands a skill's `!` lines run: inline !`…` and a fenced block opened with `!`."""
+    cmds = [m.group(2) for m in BANG_INLINE_RE.finditer(text)] + [m.group(2) for m in BANG_FENCE_RE.finditer(text)]
+    return [c.strip() for c in cmds if c.strip()]
+
+
+def allowed_tools(text: str) -> str:
+    """The frontmatter's allowed-tools entry with its continuation lines ('' when there is none)."""
+    lines = text.split("\n")
+    if not lines or lines[0].strip() != "---":
+        return ""
+    out, inside = [], False
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        key = re.match(r"^([A-Za-z_][\w-]*)\s*:", line)
+        if key:
+            inside = key.group(1).lower() in ("allowed-tools", "allowed_tools")
+        if inside:
+            out.append(line)
+    return "\n".join(out)
+
+
+def check_skill(tool: str, ti: dict, p: Path, where: str) -> int:
+    """G9: a `!` line runs in the shell before any PreToolUse hook sees it (L-004), so the guard reads it when
+    it is written — every NEW one goes through the shell checks a tool call gets. A new allowed-tools entry naming the
+    approval script is refused too. The /approve skill keeps its own lines; only the owner changes them, by hand."""
+    before = read_norm(p)
+    after = simulate(tool, ti, before)
+    if after is None:
+        return 0  # the edit cannot apply; the tool reports that itself
+    had = Counter(injected_commands(before or ""))
+    for cmd in injected_commands(after):
+        if had[cmd]:
+            had[cmd] -= 1  # already in the file: it was read when it was written
+            continue
+        if check_shell(cmd):
+            return block("G9", f"{where}: skill-ისა და slash-ბრძანების `!`-ხაზი ბრძანებას გაშვებამდე, ყოველგვარი hook-ის "
+                               "გარეშე ასრულებს (L-004). ეს ბრძანება ინსტრუმენტით გაშვებისასაც უარყოფილი იქნებოდა "
+                               "(მიზეზი ზემოთაა), ამიტომ skill-ში ჩაწერაც უარყოფილია. ასეთ ხაზს მხოლოდ მფლობელი წერს, "
+                               "ხელით.")
+    if len(APPROVER_RE.findall(allowed_tools(after))) > len(APPROVER_RE.findall(allowed_tools(before or ""))):
+        return block("G9", f"{where}: allowed-tools-ში დამტკიცების სკრიპტის წინასწარ ნებართვას მხოლოდ მფლობელი წერს, "
+                           "ხელით — ის მფლობელის /approve skill-ს ეკუთვნის, სხვაგან კი `!`-ხაზთან ერთად აგენტს "
+                           "მფლობელის დამტკიცების გაყალბების გზას მისცემდა.")
+    return 0
 
 
 def check_approvable(tool: str, ti: dict, p: Path, typ: str) -> int:

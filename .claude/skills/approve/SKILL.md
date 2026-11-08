@@ -1,9 +1,9 @@
 ---
 name: approve
-description: Owner-only. Approve (or reject) a project document — intent, spec, plan or ADR —, mark a finished plan live, or set the byte budget of the always-loaded text. Usage /approve [intent | spec N | plan N | live N | adr N | reject adr N reason | budget N]; no arguments lists what waits for the owner.
+description: Owner-only. Approve (or reject) a project document — intent, spec, plan or ADR —, mark a finished plan live, set the byte budget of the always-loaded text, or lower the drill's floor. Usage /approve [intent | spec N | plan N | live N | adr N | reject adr N reason | budget N | floor N]; no arguments lists what waits for the owner.
 disable-model-invocation: true
 allowed-tools: Bash(bash .claude/hooks/py.sh tools/approve.py *)
-argument-hint: "[intent | spec N | plan N | live N | adr N | reject adr N <reason> | budget N]"
+argument-hint: "[intent | spec N | plan N | live N | adr N | reject adr N <reason> | budget N | floor N]"
 ---
 
 # /approve — the owner's decision
@@ -11,7 +11,8 @@ argument-hint: "[intent | spec N | plan N | live N | adr N | reject adr N <reaso
 The owner has just run this command. The result below comes from `tools/approve.py`; it has ALREADY
 been applied (or refused). Nothing is waiting for you to approve. `live N` marks a finished (`done`) plan
 live — the person saw it working, published it and the pilot is over — and moves the project to stage 6,
-run and observe (ADR-0013).
+run and observe (ADR-0013). `floor N` lowers the drill's floor — the number of cases the drill must hold —
+after the person heard why cases left the drill (ADR-0015).
 
 Result:
 

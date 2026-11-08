@@ -16,6 +16,19 @@ REVIEW CONTRACT (severity scale, domain invariants, output format):
 DIFF UNDER REVIEW:
 {diff}
 
+YOUR PREVIOUS REVIEW OF THIS TASK (round 1 has none):
+{previous_review}
+
+THE MAKER'S RESPONSE TO IT — per finding: fixed, or rejected with a reason (the maker may send none):
+{maker_response}
+
+From round 2 on, start by accounting for every finding of your previous review, one line each:
+PREVIOUS <n>: resolved | open | rejected-accepted | disputed — <one-line reason>
+resolved: the diff fixes it. open: it is still there. rejected-accepted: the maker rejected it and the reason holds
+in the files. disputed: the maker rejected it and the reason does not hold. Raise a rejected finding again only with
+new evidence from the files, not by repeating it. Write every open or disputed finding again in the FINDING format
+below — a PREVIOUS line alone does not count as a finding.
+
 Check, in this order: (1) every acceptance criterion this task claims is met and proven by a test,
 gate or eval; (2) tests would fail if the behaviour were wrong; (3) domain invariants and security;
 (4) scope — nothing changed outside the task; (5) Georgian quality of any user-facing text.
