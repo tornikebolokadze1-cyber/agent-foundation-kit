@@ -16,6 +16,8 @@ exit would abort the /approve skill and hide the message from the owner.
 
 `budget N` sets the owner's byte budget for the text every session loads:
 max_bytes of the budget gate in tools/gates/gates.toml, with its own ledger row.
+`floor N` sets the drill's floor — how many cases tools/gates/drill.py holds (ADR-0015):
+`floor` of the drill gate, with its own ledger row. It rises with the drill; only this lowers it.
 
 The guard (.claude/hooks/guard.py) stops the agent from running this file or writing
 the ledger; the LEDGER check in tools/context_graph.py catches an approval status that
@@ -38,6 +40,7 @@ for _stream in (sys.stdout, sys.stderr):
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import budget  # noqa: E402
 import context_graph as cg  # noqa: E402
+import drill_floor  # noqa: E402
 
 USAGE = """გამოყენება:
   /approve                        რა ელოდება შენს დამტკიცებას
@@ -48,6 +51,7 @@ USAGE = """გამოყენება:
   /approve adr 0001               ADR-0001 → accepted    (თუ supersedes აქვს, ძველი → superseded)
   /approve reject adr 0001 მიზეზი  ADR-0001 → rejected
   /approve budget 34000           ყოველ სესიაში ჩატვირთული ტექსტის ბიუჯეტი, ბაიტებში
+  /approve floor 1000             დრილის იატაკი — რამდენ შემთხვევას შეიცავს დრილი (მხოლოდ დასაწევად გჭირდება)
 ბოლოს შეგიძლია შენიშვნა დაურთო: /approve adr 0001 ვეთანხმები, ოღონდ …"""
 
 TARGET = {"intent": "accepted", "spec": "approved", "plan": "approved", "adr": "accepted"}
@@ -104,9 +108,10 @@ def parse_args(raw: str) -> tuple[str, str, str, str]:
     if not toks:
         return "help", "", "", ""
     head = toks[0].lower()
-    if head in ("budget", "ბიუჯეტი"):
+    if head in ("budget", "ბიუჯეტი", "floor", "იატაკი"):
+        kind = "budget" if head in ("budget", "ბიუჯეტი") else "floor"
         num = (toks[1] if len(toks) > 1 else "").replace(",", "").replace("_", "")
-        return ("approve" if action == "approve" and num.isdigit() else "help"), "budget", num, " ".join(toks[2:])
+        return ("approve" if action == "approve" and num.isdigit() else "help"), kind, num, " ".join(toks[2:])
     m = re.fullmatch(r"(adr|spec|plan)-(\d+)", head)
     if m:
         return action, m.group(1), f"{int(m.group(2)):04d}", " ".join(toks[1:])
@@ -244,6 +249,35 @@ def set_budget(root: Path, new: int, note: str) -> str:
     return f"✅ ყოველ სესიაში ჩატვირთული ტექსტის ბიუჯეტი: {old:,} → {new:,} ბაიტი. {tail} ჩაიწერა memory/approvals.md-ში."
 
 
+def set_floor(root: Path, new: int, note: str) -> str:
+    """The drill's floor (ADR-0015): `floor` of the drill gate in gates.toml and a ledger row — both or neither. The
+    floor rises with the drill on its own; lowering it is the owner's alone (guard G7, the drill gate's LEDGER)."""
+    path = root / drill_floor.GATES
+    try:
+        before = path.read_text(encoding="utf-8")
+    except OSError as e:
+        return f"❌ {drill_floor.GATES} ვერ წავიკითხე: {e}"
+    old = drill_floor.floor_in(before)
+    blocks = before.split("[[gate]]")
+    at = [i for i, b in enumerate(blocks) if re.search(r'(?m)^id\s*=\s*"drill"', b)]
+    if old is None or len(at) != 1:
+        return f"❌ {drill_floor.GATES}-ში `drill` gate-ს `floor` არ აქვს — დრილის იატაკი ჯერ არ არსებობს."
+    blocks[at[0]], n = re.subn(r"(?m)^(floor[ \t]*=[ \t]*)[\d_]+", rf"\g<1>{new}", blocks[at[0]], count=1)
+    after = "[[gate]]".join(blocks)
+    if n != 1 or drill_floor.floor_in(after) != new:
+        return "❌ floor ვერ შეიცვალა — ფაილი უცვლელია."
+    ledger_before = ledger_text(root)
+    path.write_text(after, encoding="utf-8", newline="\n")
+    try:
+        write_ledger(root, ledger_before, [ledger_row(drill_floor.LEDGER_ID, f"{old:,}", f"{new:,}", drill_floor.GATES,
+                                                      note or "დრილის იატაკი — რამდენ შემთხვევას შეიცავს დრილი")])
+    except OSError as e:
+        path.write_text(before, encoding="utf-8", newline="\n")
+        return f"❌ ჟურნალში ჩაწერა ვერ მოხერხდა ({e}) — იატაკი უცვლელია."
+    return (f"✅ დრილის იატაკი: {old:,} → {new:,} შემთხვევა. ჩაიწერა memory/approvals.md-ში. შემდეგ commit-ზე დრილს "
+            f"ზუსტად {new:,} შემთხვევა უნდა ჰქონდეს; იატაკი დრილთან ერთად თავისით იზრდება, დაწევა კი ისევ შენი გადასაწყვეტია.")
+
+
 def list_pending(g: cg.Graph) -> str:
     pend, eng = cg.pending(g), cg.pending(g, engine=True)
     lines = ["შენს დამტკიცებას ელოდება:"] if pend else ["პროექტში ამჟამად არაფერი ელოდება შენს დამტკიცებას."]
@@ -269,8 +303,8 @@ def main(argv: list[str]) -> int:
     raw = " ".join(argv[1:]).strip().strip("'\"")
     root = root_dir()
     action, kind, num, note = parse_args(raw)
-    if kind == "budget" and action == "approve":
-        print(set_budget(root, int(num), note))
+    if kind in ("budget", "floor") and action == "approve":
+        print((set_budget if kind == "budget" else set_floor)(root, int(num), note))
         return 0
     try:
         g = cg.load(root)

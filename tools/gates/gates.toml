@@ -15,9 +15,10 @@
 #   2  behaviour: evals (Georgian quality, grounding, the domain invariants in REVIEW.md) — when the agent answers
 #   3  security & robustness: dependency audit, SAST, e2e — before any public pilot
 #
-# Rules for changing this file (it is a protected harness file — the owner is asked first):
+# Rules for changing this file (an engine file: no permission window since ADR-0015 — the drill at commit guards it):
 #   - never lower a threshold or disable a gate to make a red run green; fix the cause
 #   - every new gate gets a seeded-defect drill in tools/gates/drill.py (ADR-0006)
+#   - the owner's numbers: `max_bytes` (budget) only the owner raises, `floor` (drill) only the owner lowers
 #   - `builtin` names a checker inside gate.py; `cmd` runs a command given as an argument list, without
 #     a shell (exit 0 = pass; a command that is not installed is INCONCLUSIVE, never a pass). In a `cmd`,
 #     gate.py fills in `{venv_python}` (the project's .venv: .venv/Scripts/python on Windows, .venv/bin/python
@@ -119,9 +120,10 @@ id = "drill"
 level = 0
 enabled = true
 builtin = "drill"
+floor = 1070
 pre_commit = true
 stop = false
-what = "tools/gates/drill.py: every guard, hook and gate is broken on purpose and must catch it"
+what = "tools/gates/drill.py: every guard, hook and gate is broken on purpose and must catch it, and the drill holds exactly `floor` cases (ARMED plus ELSEWHERE): the floor rises with the drill, only the owner lowers it (`/approve floor N`, ADR-0015)"
 
 # ── Level 1 — code quality ─────────────────────────────────────────────────────
 # Switched on at the start of stage 4, with the person's yes, using the commands the stack ADR records — the
@@ -153,7 +155,7 @@ level = 2
 enabled = false
 cmd = ["{python}", "evals/run.py", "--suite", "georgian", "--gate"]
 reason = "the agent does not exist yet; the suite is written from the first spec (see evals/README.md)"
-what = "Georgian regression: deterministic ≥95%, adversarial ≥95%, grammar ≥4.3/5"
+what = "Georgian regression: deterministic ≥95%, adversarial ≥95%, each language-error type absent from ≥95% of answers (a yes/no question with a quote per type; a judge below kappa 0.6 against the owner's labels makes it INCONCLUSIVE)"
 
 [[gate]]
 id = "evals-grounding"
