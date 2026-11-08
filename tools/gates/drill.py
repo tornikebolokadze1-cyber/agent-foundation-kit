@@ -80,7 +80,10 @@ def expect(ok: bool, label: str, dead_detail: str = "", kind: str = "seeded") ->
     if ok:
         record("ARMED", label)
     else:
-        record("DEFECT" if kind == "control" else "DEAD", f"{label}{' — ' + dead_detail if dead_detail else ''}")
+        # On one line: gate.py keeps only the lines that begin DEAD or DEFECT, so a reason on the lines after one never
+        # reached the gate's log (2026-11-09, three cases DEAD in CI with their reason cut off).
+        detail = " ⏎ ".join(dead_detail.splitlines())
+        record("DEFECT" if kind == "control" else "DEAD", f"{label}{' — ' + detail if detail else ''}")
 
 
 def elsewhere_cases(n: int, label: str) -> None:
@@ -1843,15 +1846,21 @@ def g_backup_line(tmp: Path, vault: Path) -> None:
     expect(rc == 0 and out == "" and err == "", f"control: {most} commits beside the branch's copy — no more than the "
            "threshold → no line, exit 0", f"rc={rc} {(out + err)[-200:]}", kind="control")
     git(r, "commit", "-q", "--allow-empty", "-m", "one more")
-    git(r, "push", "-q", str(bare), "main:main")  # the remote now holds them all; pushed by path, git's copy stays old
+    # The remote now holds them all and git's copy of it stays old: the remote takes them itself, as when another
+    # computer uploads the same commits. A push by path kept the copy old on git 2.43 and 2.53, but this case went DEAD
+    # on CI's git 2.56 on all four systems (2026-11-09) — a fixture must not lean on such a side effect of git.
+    run(["git", "-C", str(bare), "fetch", "-q", str(r), "main:main"])
     rc, out, err = said(r)
+    only_here = run(["git", "-C", str(r), "rev-list", "--count", "HEAD", "--not", "--remotes"])[1].strip()
     expect(rc == 0 and out.startswith("💾 ბექაფი:") and f"{most + 1} commit მხოლოდ ამ კომპიუტერზეა" in out
            and "`origin/main`" in out and "ბოლო fetch ან push — " in out and "ქსელით არ შემოწმებულა" in out
            and tracking(r) == seen and (r / ".git/config").read_bytes() == config
            and not (r / ".git/FETCH_HEAD").exists(),
            f"seeded: {most + 1} commits the branch's copy does not hold → the line, its mark 💾, the count, the copy "
            "and when git last saw the remote — with no network (the remote holds them all, git's copy of it is "
-           "unchanged, no fetch) and no git setting changed (L-005)", f"rc={rc} {(out + err)[-300:]}")
+           "unchanged, no fetch) and no git setting changed (L-005)",
+           f"rc={rc} {(out + err)[-300:]} · commits git sees on no remote: {only_here} · git's copy before "
+           f"{seen.split()} after {tracking(r).split()}")
     sid = "bac0e143-0000-4000-8000-000000000143"
     out = status(r, sid)
     expect(f"backup: 💾 ბექაფი: {most + 1} commit" in out, "seeded: /session-close's facts (`episodic.py status`) carry "
