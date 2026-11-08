@@ -15,8 +15,10 @@ nothing cannot look green (ADR-0006: no evidence is not a pass).
 
 At commit (--pre-commit) a gate that reads files reads the staged text — the next commit's tree, exported from the
 git index — never the working copy; the secrets gate reads the staged files itself. A gate that runs the working
-copy's code (a `cmd` gate, the drill) is INCONCLUSIVE when a staged file changed again after `git add`. Known limit: a
-file changed on disk but not staged at all still reaches a `cmd` gate as it is on disk.
+copy's code (a `cmd` gate, the drill) is INCONCLUSIVE when a staged file changed again after `git add`. The drill gate's
+own table (its floor, on or off) is the staged gates.toml's too, unless drill.py on disk is not what the commit
+records: then the drill counts the disk's cases and is held to the disk's floor. Known limit: a file changed on disk but
+not staged at all still reaches a `cmd` gate or the drill as it is on disk.
 """
 from __future__ import annotations
 
@@ -538,17 +540,43 @@ def floor_verdict(last: str, floor: int) -> str:
 
 def drill_switched_off(root: Path, gates: list[dict], pre_commit: bool) -> Result | None:
     """ADR-0015: a drill gate switched off, removed, or kept from the commit (pre_commit = false) arms no case — its floor
-    is 0, which needs the owner's row like any other lowering. None when the drill runs, or that row is there."""
-    drill = next((g for g in gates if g.get("builtin") == "drill"), None)
+    is 0, which needs the owner's row like any other lowering. When the last commit's drill gate already did not
+    run at commit (the owner switched it off with their row), the floor written on it is what is held — written
+    against written, as in the guard's G7 —, so a later commit no longer needs that row again, while lowering
+    the written floor or taking the gate out still does. None when the drill runs, or that row is there."""
+    drill = next((g for g in gates if drill_floor.is_drill(g)), None)
     if drill is not None and drill.get("enabled") and (drill.get("pre_commit") or not pre_commit):
         return None
-    lowered = floor_lowered(root, 0, pre_commit)
+    head = drill_floor.drill_gate(git_show(root, f"HEAD:{drill_floor.GATES}"))
+    standing = None if head is None or drill_floor.runs_at_commit(head) else drill_floor.floor_of(drill)
+    lowered = floor_lowered(root, 0 if standing is None else standing, pre_commit)
     if not lowered:
         return None
     how = ("is gone from gates.toml" if drill is None else "is switched off" if not drill.get("enabled")
            else "no longer runs at commit (pre_commit = false)")
+    if standing is not None:
+        return Result("drill", "FAIL", f"the drill gate {how} and the floor written on it went down — once the owner "
+                      "has switched the drill off, that floor is what is held: put it back", [lowered])
     return Result("drill", "FAIL", f"the drill gate {how} — a drill that does not run arms no case, its floor would be 0: "
                   "switch it back on", [lowered])
+
+
+def drill_not_staged(root: Path) -> str:
+    """At commit, drill.py on disk that is not what the commit records — cases not staged yet, perhaps another
+    session's (L-007): the drill would count cases the commit does not hold, so it is not run. "" when they are one
+    text, or when drill.py lies outside the project (a drill case's stand-in)."""
+    script = rel(root, DRILL_SCRIPT)
+    if Path(script).is_absolute():
+        return ""
+    r = subprocess.run(["git", "-C", str(root), "diff", "--quiet", "--", script], capture_output=True, timeout=60)
+    if r.returncode == 0:
+        return ""
+    if r.returncode != 1:
+        return (f"DRILL-UNSTAGED: git could not tell whether {script} on disk is what this commit records — nothing "
+                "was run")
+    return (f"DRILL-UNSTAGED: {script} on disk is not what this commit records — the drill would count cases the "
+            f"commit does not hold: stage it (git add {script}) and commit again, or, if another session is changing "
+            "it, wait until that session commits (L-007)")
 
 
 def gate_drill(root: Path, files: list[Path], pre_commit: bool = False, gate: dict | None = None, **_) -> Result:
@@ -558,6 +586,9 @@ def gate_drill(root: Path, files: list[Path], pre_commit: bool = False, gate: di
         if not any(s.startswith(HARNESS_PREFIXES) for s in staged):
             return Result("drill", "SKIP", "no engine file is staged — the drill runs when one changes (and on every "
                                            "full `gate.py` run)")
+        unstaged = drill_not_staged(root)
+        if unstaged:
+            return Result("drill", "INCONCLUSIVE", unstaged)
     floor = drill_floor.floor_of(gate)
     if floor is None:
         return Result("drill", "INCONCLUSIVE", "the drill gate has no integer `floor` in gates.toml — the drill's floor is "
@@ -615,9 +646,33 @@ def run_cmd_gate(root: Path, g: dict) -> Result:
     return Result(g["id"], status, f"`{shown}` exit {r.returncode}", (r.stdout + r.stderr).strip().splitlines()[-15:])
 
 
+def gates_file() -> Path:
+    return Path(os.environ.get("GATES_TOML") or HERE / "gates.toml")
+
+
 def load_gates() -> list[dict]:
-    path = Path(os.environ.get("GATES_TOML") or HERE / "gates.toml")
-    return tomllib.loads(path.read_text(encoding="utf-8"))["gate"]
+    return tomllib.loads(gates_file().read_text(encoding="utf-8"))["gate"]
+
+
+def committed_drill(root: Path, gates: list[dict]) -> list[dict]:
+    """At commit, the drill gate — its floor, on or off, run at commit — as the commit records it, from the
+    staged gates.toml: a raised floor left unstaged no longer passes a grown drill that is staged. drill.py on disk that
+    is not what the commit records no longer brings the disk's gate along: it stops the drill
+    (drill_not_staged). A gate list outside the project (a drill case) or not under git yet is used as it is."""
+    name = rel(root, gates_file())
+    if Path(name).is_absolute():
+        return gates
+    staged = git_show(root, f":{name}")
+    if staged is None and git_show(root, f"HEAD:{name}") is None:
+        return gates
+    try:
+        table = tomllib.loads(staged or "").get("gate", [])
+    except tomllib.TOMLDecodeError:
+        table = []  # the toml gate names the error; a drill gate the commit cannot read arms no case
+    drills = [g for g in table if drill_floor.is_drill(g)] if isinstance(table, list) else []
+    at = next((i for i, g in enumerate(gates) if drill_floor.is_drill(g)), len(gates))
+    rest = [g for g in gates if not drill_floor.is_drill(g)]
+    return rest[:at] + drills + rest[at:]
 
 
 # At commit these read the next commit's tree (export_index); the secrets gate reads the staged files itself, and the
@@ -690,7 +745,7 @@ def ran_on_other_text(g: dict, later: list[str] | None) -> Result | None:
     if later is None:
         return Result(g["id"], "INCONCLUSIVE", "git could not tell whether a staged file changed after `git add` — "
                       "nothing was run")
-    hit = [n for n in later if g.get("builtin") != "drill" or n.startswith(HARNESS_PREFIXES)]
+    hit = [n for n in later if not drill_floor.is_drill(g) or n.startswith(HARNESS_PREFIXES)]
     if not hit:
         return None
     return Result(g["id"], "INCONCLUSIVE", f"{len(hit)} staged file(s) changed after `git add` ({', '.join(hit[:3])}) — "
@@ -750,6 +805,15 @@ def main(argv: list[str] | None = None) -> int:
             state = "on " if g.get("enabled") else "off"
             print(f"L{g['level']} {state} {g['id']:16} {g['what']}" + ("" if g.get("enabled") else f"  — {g.get('reason')}"))
         return 0
+    if a.pre_commit and not a.files:  # the drill gate the commit records
+        gates = every = committed_drill(root, every)
+    drills = [g for g in every if drill_floor.is_drill(g)]
+    several = None
+    if len(drills) > 1:  # one gate holds the drill's floor: a second one hid the last commit's
+        ids = ", ".join(str(g.get("id")) for g in drills)
+        several = Result("drill", "FAIL", f"DRILLS: {gates_file().name} has {len(drills)} drill gates ({ids}) — one "
+                         "gate holds the drill's floor and a second one hides it: keep one")
+        gates = every = [g for g in every if not drill_floor.is_drill(g)]
     want = set(a.only.split(",")) if a.only else set()
     if a.only:
         gates = [g for g in gates if g["id"] in want]
@@ -761,7 +825,9 @@ def main(argv: list[str] | None = None) -> int:
     if files is not None:
         files = [f.resolve() for f in files if f.exists()]
     results = run(root, gates, files, a.pre_commit)
-    if not a.files and (not want or "drill" in want):  # a run that holds the drill (ADR-0015)
+    if several:
+        results.append(several)
+    elif not a.files and (not want or "drill" in want):  # a run that holds the drill (ADR-0015)
         off = drill_switched_off(root, every, a.pre_commit)
         results = [r for r in results if r.gate != "drill"] + [off] if off else results
     for r in results:

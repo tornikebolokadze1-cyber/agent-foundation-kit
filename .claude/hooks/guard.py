@@ -36,7 +36,9 @@ Blocks with exit 2 (the reason goes to stderr, which Claude sees):
         unseen command                (L-004): a NEW one that the shell checks below would refuse (B1–B4, S1) is
                                       refused when it is written, and so is a new allowed-tools entry naming the
                                       approval script — in any .claude/…/skills/ or …/commands/ folder, this
-                                      project's, the user's or a plugin's; lines already there are not read again
+                                      project's, the user's or a plugin's; lines already there are not read again.
+                                      A command on the project's ask or deny list is left to Claude Code: allowed-tools
+                                      carries no `!` line past either, in auto mode too (probe 2026-11-08)
   A file outside the project still gets S2, G6, G8, G1 (by its name) and G9; another name for the project folder
   (//localhost/c$/…, //127.0.0.1/c$/…, a //?/C:/… long path) is read as the project itself.
   Bash | PowerShell
@@ -76,8 +78,8 @@ Also records each file the session edits in <state>/touched-<session_id>, so the
 gate checks only what THIS session changed (another session in the same folder is
 never blamed for someone else's broken link).
 
-An unparseable payload is let through (exit 0) and logged: a guard that cannot read its
-input must not freeze all work — but it must not be silent either.
+An unparseable payload is blocked and logged (GUARD[X1]; until 2026-11-01 it was let
+through): a guard that cannot read the call must never pass it in silence.
 """
 from __future__ import annotations
 
@@ -100,7 +102,7 @@ CODE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(CODE_ROOT / "tools"))
 from budget import GATES as BUDGET_FILE, always_loaded, budget, budget_in, import_closure, kind as loaded_kind  # noqa: E402
 from context_graph import OWNER_STATUSES, PENDING_STATUSES, status_of, type_for_path  # noqa: E402
-from drill_floor import floor_in, held_in  # noqa: E402
+from drill_floor import drill_gate, floor_in, floor_of, held_in, runs_at_commit  # noqa: E402
 from redact import MARKER_RE  # noqa: E402
 
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
@@ -409,7 +411,10 @@ def check_budget(tool: str, ti: dict, root: Path, rel: str) -> int:
             return block("G7", f"{rel}: ბიუჯეტს ({b0:,} ბაიტი ყოველთვის ჩატვირთულ ტექსტზე) მხოლოდ მფლობელი ზრდის ან "
                                "აუქმებს — `/approve budget <N>`. შემცირება შეიძლება; სხვა ცვლილებისთვის max_bytes "
                                "უცვლელი დატოვე.")
-        f0, f1 = floor_in(before or ""), held_in(after)  # a drill gate switched off holds 0: it arms no case
+        # A drill gate switched off holds 0: it arms no case. One the owner has already switched off holds its written
+        # floor, so an edit of another line of it is no lowering.
+        drill0 = drill_gate(before)
+        f0, f1 = floor_of(drill0), held_in(after) if runs_at_commit(drill0) else floor_in(after)
         if f0 is not None and (f1 is None or f1 < f0):  # ADR-0015: the floor rises with the drill, the owner lowers it
             return block("G7", f"{rel}: დრილის იატაკს ({f0:,} შემთხვევა) მხოლოდ მფლობელი წევს, აუქმებს ან თიშავს "
                                "(გამორთული დრილი არც ერთ შემთხვევას არ ამოწმებს) — `/approve floor <N>`. აწევა შეიძლება "

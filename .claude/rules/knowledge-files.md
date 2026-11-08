@@ -13,7 +13,8 @@ paths:
 - **Frontmatter** (YAML subset: `key: value`, quoted strings, `[a, b]`, `- item` lists) is required by
   location: `intent.md` → intent · `plan.md` → roadmap · `progress.md` → progress ·
   `docs/specs/SPEC-*` → spec · `docs/plans/PLAN-*` → plan · `docs/adr/ADR-*` → adr ·
-  `docs/domain/*` → domain · `memory/episodes/EP-*` → episode. File name starts with its id.
+  `docs/domain/*` → domain · `memory/episodes/EP-*` → episode · `memory/lessons/L-*` → lesson (its story; the
+  rule is its line in `memory/LESSONS.md`, status `living`). File name starts with its id.
   An engine ADR carries `scope: engine` (the engine's own rule — it never holds up the project's stage);
   a project ADR has no `scope`. Any other value is a SCOPE error.
 - **Statuses:** intent draft/accepted · spec draft/review/approved/superseded ·

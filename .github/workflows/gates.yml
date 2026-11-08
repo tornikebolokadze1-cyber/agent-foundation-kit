@@ -3,6 +3,10 @@
 # more on Ubuntu with Python 3.13 (since 2026-10-19 every drill case lives in tools/gates/drill.py, which gate.py runs).
 # The job named `gates` is the required check: it passes only when every system passed, so a red macOS or Linux run
 # stops the merge exactly as a red Windows run does.
+# Since 2026-11-09 every system first fetches gitleaks 8.30.1 — a pinned release whose sha256 is checked against the
+# release's own checksum list — and hands it to the secrets gate through GITLEAKS_BIN, so CI scans with gitleaks as the
+# person's machine does once gitleaks is installed. A download that fails or does not match stops the job; a GITLEAKS_BIN
+# that names no file makes the secrets gate INCONCLUSIVE — never a silent fall back to the engine's own scanner.
 # Only in this repository: a project made from the template skips these jobs (its commits are checked by
 # .githooks/pre-commit on the person's own machine), so nobody's Actions minutes are spent.
 name: gates
@@ -47,11 +51,47 @@ jobs:
       - name: The launcher runs under macOS's own bash 3.2
         if: runner.os == 'macOS'
         run: /bin/bash .claude/hooks/py.sh -c "import sys; print(sys.executable, sys.version.split()[0])"
+      - name: gitleaks for the secrets gate — a pinned release, its checksum checked
+        shell: bash
+        run: |
+          version=8.30.1
+          case "$RUNNER_OS/$RUNNER_ARCH" in  # sha256 from the release's gitleaks_8.30.1_checksums.txt
+            Linux/X64)   asset=linux_x64.tar.gz;    sum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb ;;
+            macOS/ARM64) asset=darwin_arm64.tar.gz; sum=b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5 ;;
+            macOS/X64)   asset=darwin_x64.tar.gz;   sum=dfe101a4db2255fc85120ac7f3d25e4342c3c20cf749f2c20a18081af1952709 ;;
+            Windows/X64) asset=windows_x64.zip;     sum=d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e ;;
+            *) echo "no pinned gitleaks for $RUNNER_OS/$RUNNER_ARCH" >&2; exit 1 ;;
+          esac
+          name="gitleaks_${version}_${asset}"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$name" "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${name}"
+          python - "$RUNNER_TEMP/$name" "$sum" <<'PY'
+          import hashlib, os, sys, tarfile, zipfile
+          from pathlib import Path
+          archive, want = Path(sys.argv[1]), sys.argv[2]
+          got = hashlib.sha256(archive.read_bytes()).hexdigest()
+          if got != want:
+              sys.exit(f"{archive.name}: sha256 {got}, expected {want} - not used")
+          dest = archive.parent / "gitleaks-bin"
+          dest.mkdir(exist_ok=True)
+          if archive.suffix == ".zip":
+              with zipfile.ZipFile(archive) as z:
+                  z.extract("gitleaks.exe", dest)
+              binary = dest / "gitleaks.exe"
+          else:
+              with tarfile.open(archive) as t:
+                  t.extract("gitleaks", dest, filter="data")
+              binary = dest / "gitleaks"
+              binary.chmod(0o755)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+              env.write(f"GITLEAKS_BIN={binary}\n")
+          print(f"{archive.name}: sha256 checked -> GITLEAKS_BIN={binary}")
+          PY
       - name: Every gate and the drill
         shell: bash
         env:
           PYTHONUTF8: "1"
         run: |
+          "${GITLEAKS_BIN:?the gitleaks step set no GITLEAKS_BIN}" version
           export ENGINE_PYTHON="$(command -v python)"
           "$ENGINE_PYTHON" --version
           bash .claude/hooks/py.sh tools/gates/gate.py

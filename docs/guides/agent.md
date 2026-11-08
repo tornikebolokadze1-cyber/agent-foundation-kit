@@ -2,7 +2,8 @@
 id: GUIDE-agent
 type: guide
 title: AI ასისტენტი და აგენტი — სახელმძღვანელო
-updated: 2026-11-06
+updated: 2026-11-09
+code: [src, evals, prompts]
 ---
 
 # AI ასისტენტი და აგენტი — სახელმძღვანელო

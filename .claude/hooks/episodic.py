@@ -7,7 +7,7 @@ Wired in .claude/settings.json through .claude/hooks/py.sh (hook JSON on stdin):
   SessionStart startup|resume|clear|compact -> episodic.py start
       Opens this session's episode (memory/episodes/EP-<date>-<sid8>.md) and prints
       the working memory — progress.md "ახლა" + plan.md current phase + tasks/todo.md
-      "now/next" + session facts —
+      "now/next" + session facts (among them the backup line, tools/backup_line.py) —
       as additionalContext. The `compact` source re-injects it after every compaction.
       Also starts catch-up summaries for episodes that were never closed (power cut), and gives an episode to a
       session that ran without this engine's SessionStart (L-020: a transcript with no episode, or one that
@@ -22,7 +22,8 @@ Wired in .claude/settings.json through .claude/hooks/py.sh (hook JSON on stdin):
       DETACHED child (`summarize`), because SessionEnd hooks share a 1.5 s budget.
 
   Owner/agent commands:
-    episodic.py status <session_id>   facts for /session-close (episode path, times, reconcile list)
+    episodic.py status <session_id>   facts for /session-close (episode path, times, reconcile list, the engine
+                                      and backup lines)
     episodic.py index                 regenerate memory/episodes/INDEX.md
     episodic.py summarize <payload>   the detached child (not for manual use)
     episodic.py compact-verify <payload>  the detached child of PostCompact (not for manual use)
@@ -65,9 +66,11 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from collections.abc import Callable
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypeVar
 
 for _stream in (sys.stdin, sys.stdout, sys.stderr):
     try:
@@ -79,12 +82,16 @@ CODE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(CODE_ROOT / "tools"))
 import redact  # noqa: E402 — the summarizer is a model; its text is scrubbed of secrets before it reaches disk
 import claude_cli  # noqa: E402 — which claude, and what a nested session may inherit (shared with orchestration/run.py)
-from context_graph import parse_frontmatter, printable, set_field  # noqa: E402
+from context_graph import Graph, load as load_graph, parse_frontmatter, printable, set_field, unlink_unresolved  # noqa: E402
 import engine_line  # noqa: E402 — the session-end line: which engine files changed, drilled or not (ADR-0015)
+import backup_line  # noqa: E402 — the backup line: commits that are only on this computer
 
 WORKING_LINES = 60            # cap per injected block
 BRIEF_CHARS = 9_000           # cap on the whole brief: Claude Code keeps a hook text over ~10,000 characters in a file
                               # and shows the agent only its first ~2,000 (measured in transcripts 2026-10-26)
+# Each block's own cap in characters (ADR-0017): with the facts at their longest the three blocks fit in BRIEF_CHARS
+# whole, so a block kept under its cap is never cut — the dashboard stays short and the story goes to the log below it.
+BLOCK_CAPS = {"progress.md": 1_800, "plan.md": 2_200, "tasks/todo.md": 2_600}
 RECONCILE_SHOWN = 10          # sessions to reconcile named in the brief; INDEX.md and `episodic.py status` list them all
 FACT_CHARS = 150              # a title in the brief's facts — model-written, so no longer than this
 TRANSCRIPT_CHARS = 60_000     # cap on transcript text handed to the summariser: its opening and its end
@@ -101,6 +108,7 @@ COMPACT_WAIT_S = 120          # how long compact-verify waits for a compaction's
 FINGERPRINT_CHARS = 600       # start of the <summary> body that identifies one compaction
 LOCK_WAIT_S = float(os.environ.get("EPISODIC_LOCK_WAIT_S") or 30)  # a writer of progress.md / PROPOSALS.md waits
 LOCK_STALE_S = 300            # a lock this old was left by a writer that died
+RETRY_S = 2.0                 # a read or a replace Windows refused is tried again for this long
 CLOSE_HEADING_RE = re.compile(r"(?m)^## დახურვა — (\S+)")  # cmd_end's heading: when the session ended
 START_GIT_RE = re.compile(r"(?m)^- git: `[^`\n]*` @ `([^`\n]+)`")  # the first is ensure_episode's: where it began
 ENGINE_RE = re.compile(r"(?m)^- ძრავა: (.+)$")  # cmd_end's engine line (ADR-0015)
@@ -214,17 +222,46 @@ def log(msg: str) -> None:
         pass
 
 
+# Windows gives a console program started by a process that has no console — the detached summarizer — a console window
+# of its own unless told not to: `claude -p` showed an empty black window for the whole summary (measured
+# 2026-11-08: the child's GetConsoleWindow() was a visible window without the flag, none with it).
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def run_child(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+    """subprocess.run for this hook's own children (git, the summarizer's claude): never a console window of their own."""
+    return subprocess.run(cmd, creationflags=NO_WINDOW, **kw)
+
+
 def git(root: Path, *args: str) -> str:
     try:
-        r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=10,
-                           encoding="utf-8", errors="replace")
+        r = run_child(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=10,
+                      encoding="utf-8", errors="replace")
         return r.stdout.strip() if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         return ""
 
 
+T = TypeVar("T")
+
+
+def retried(action: Callable[[], T]) -> T:
+    """Windows refuses to open a file while another process replaces it, and refuses the replace while another process
+    holds the file open (a probe met 5,365 refused reads in 65,000 while a writer replaced one file, and 3,681
+    refused replaces while a reader held it). Such a refusal lasts a moment, so it is tried again for up to RETRY_S
+    seconds; one that lasts longer goes up as before."""
+    end = time.monotonic() + RETRY_S
+    while True:
+        try:
+            return action()
+        except PermissionError:
+            if time.monotonic() >= end:
+                raise
+            time.sleep(0.05)
+
+
 def read(p: Path) -> str:
-    return p.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    return retried(lambda: p.read_text(encoding="utf-8", errors="replace")).replace("\r\n", "\n")
 
 
 def write_atomic(p: Path, text: str) -> None:
@@ -232,7 +269,12 @@ def write_atomic(p: Path, text: str) -> None:
     fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.", suffix=".tmp")
     with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
-    os.replace(tmp, p)
+    try:
+        retried(lambda: os.replace(tmp, p))
+    except OSError:  # still refused, or failed: no half-written copy is left beside the file
+        with suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def take_lock(lock: Path, name: str) -> bool:
@@ -298,6 +340,12 @@ def clip(text: str, n: int) -> str:
     return "\n".join(lines[:n]) + (f"\n… (+{len(lines) - n} ხაზი)" if len(lines) > n else "")
 
 
+def shorten(text: str, n: int) -> str:
+    """One line in at most n characters, ending with … when it was longer — a fact of the brief, which is never cut."""
+    line = " ".join(text.split())
+    return line if len(line) <= n else line[:n - 1].rstrip() + "…"
+
+
 def fit(text: str, n: int, where: str) -> str:
     """`text` in at most `n` characters: a longer one is cut at a line end when one is near, and names the file that
     holds it whole."""
@@ -321,12 +369,13 @@ def fair_shares(sizes: list[int], budget: int) -> list[int]:
 
 def compose_brief(source: str, facts: list[str], blocks: list[tuple[str, str, str]]) -> str:
     """The brief in at most BRIEF_CHARS: the session's facts first and whole (they carry the ↻3 warning), then each
-    (title, file, text) block in its share of the rest."""
+    (title, file, text) block in its share of the rest, never more than its own cap (ADR-0017)."""
     out = f"## სამუშაო მეხსიერება (SessionStart:{source})\n\n### სესიის ფაქტები\n\n" + "\n".join(facts)
     heads = [f"\n\n### {title} — `{where}`\n\n" for title, where, _ in blocks]
     texts = [clip(text, WORKING_LINES) or "_ბლოკი ცარიელია ან აკლია_" for _, _, text in blocks]
     room = BRIEF_CHARS - len(out) - sum(map(len, heads))
-    for head, text, n, (_, where, _) in zip(heads, texts, fair_shares([len(t) for t in texts], room), blocks):
+    wants = [min(len(t), BLOCK_CAPS.get(where, BRIEF_CHARS)) for t, (_, where, _) in zip(texts, blocks)]
+    for head, text, n, (_, where, _) in zip(heads, texts, fair_shares(wants, room), blocks):
         out += head + fit(text, n, where)
     return out
 
@@ -334,6 +383,21 @@ def compose_brief(source: str, facts: list[str], blocks: list[tuple[str, str, st
 # ── episodes ─────────────────────────────────────────────────────────────────
 def episodes_dir(root: Path) -> Path:
     return root / "memory" / "episodes"
+
+
+def note_path(f: Path) -> str:
+    """An episode as the graph names it — its path from the project root."""
+    return f"memory/episodes/{f.name}"
+
+
+def link_graph(root: Path) -> Graph | None:
+    """The project's notes, to tell a link that opens from one that does not before text is written. None when
+    they cannot be read: then no link counts as opening, so nothing that might not open is written as a link."""
+    try:
+        return load_graph(root)
+    except Exception as e:  # noqa: BLE001 — any failure only costs links their form, never the text itself
+        log(f"links: the project's notes could not be read ({type(e).__name__}: {e}) — every link written as code")
+        return None
 
 
 def sid8(sid: str) -> str:
@@ -566,8 +630,8 @@ def call_model(text: str, known: str) -> tuple[dict | None, str]:
     fenced = ("<transcript>\n" + re.sub(r"</\s*transcript\s*>", "[/transcript]", text, flags=re.I) + "\n</transcript>\n\n"
               "<known>\n" + re.sub(r"</\s*known\s*>", "[/known]", known, flags=re.I) + "\n</known>")
     try:
-        r = subprocess.run(cmd, input=fenced, capture_output=True, text=True, timeout=SUMMARY_TIMEOUT_S,
-                           env=env, cwd=str(state_dir()), encoding="utf-8", errors="replace")
+        r = run_child(cmd, input=fenced, capture_output=True, text=True, timeout=SUMMARY_TIMEOUT_S,
+                      env=env, cwd=str(state_dir()), encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         return None, f"timeout ({SUMMARY_TIMEOUT_S}s)"
     except OSError as e:
@@ -762,6 +826,7 @@ def cmd_start(payload: dict) -> int:
     rec = reconcile_list(root)
     props = open_proposals(root)
     engine = (ENGINE_RE.findall(read(last)) or [""])[-1] if last else ""
+    backup = backup_now(root)
     facts = [
         f"- ეს სესია: `{f.relative_to(root).as_posix()}` — compact-ები: {compacts}" if f else "- ეპიზოდი ვერ შეიქმნა (იხ. episodic.log)",
         f"- ბოლო დახურული სესია: [[{last.stem}]] — {fm_get(read(last), 'title')[:FACT_CHARS] or 'უსათაურო'}" if last else "- ბოლო დახურული სესია: —",
@@ -773,8 +838,12 @@ def cmd_start(payload: dict) -> int:
                      + (f" და კიდევ {more} (სრული სია — `memory/episodes/INDEX.md`, ⚠)" if more > 0 else "")
                      + " — `/session-close`-ის დროს შეადარე `plan.md`-ს და `progress.md`-ს")
     if engine:
-        facts.append(f"- ბოლო დახურული სესიის ბოლოს: {clip(engine, ENGINE_FACT_CHARS)} — ერთი წინადადებით უთხარი "
+        facts.append(f"- ბოლო დახურული სესიის ბოლოს: {shorten(engine, ENGINE_FACT_CHARS)} — ერთი წინადადებით უთხარი "
                      "მფლობელს (ADR-0015)")
+    if backup is None:
+        facts.append("- 💾 ბექაფი: ვერ შემოწმდა — git-მა ვერ თქვა, რა არის ატვირთული")
+    elif backup:
+        facts.append(f'- {backup} — ერთი წინადადებით უთხარი მფლობელს; ატვირთვა — მხოლოდ მისი „კი"-თ')
     if started:
         facts.append(f"- ფონურად იწყება დაუხურავი სესიების შეჯამება: {', '.join(started)}")
     if compacts >= 3:
@@ -856,6 +925,8 @@ def record_compact(root: Path, payload: dict, how: str, flag: str = "") -> int:
             flag += (f"> ⚠ compact-ის შეჯამებიდან ამოიშალა გასაღებ(ებ)ი ({', '.join(sorted(set(kinds)))}) — შეამოწმე "
                      "წყარო და გაიარე როტაცია.\n\n")
             log(f"compact #{n} for {sid8(sid)}: redacted {len(kinds)} secret(s) {sorted(set(kinds))}")
+        # A link that does not open would be a graph error no one may fix in this episode later
+        summary = unlink_unresolved(summary, note_path(f), link_graph(root))
         append(f, f"\n## compact #{n} ({payload.get('trigger') or 'auto'}) — {iso()}\n\n{flag}{summary}\n")
     log(f"compact #{n} for {sid8(sid)} → {f} ({how}); payload keys: {','.join(sorted(payload))}")
     return 0
@@ -946,6 +1017,15 @@ def engine_now(root: Path, ep_text: str) -> str | None:
     commit; no such line: only what is not committed). "" — no engine file changed; None — git could not say."""
     began = START_GIT_RE.search(ep_text)
     return engine_line.line(root, "HEAD" if not began else None if began.group(1) == "-" else began.group(1))
+
+
+def backup_now(root: Path) -> str | None:
+    """The backup line: "" — nothing is only on this computer; None — git could not say what is uploaded."""
+    try:
+        return backup_line.line(root)
+    except Exception as e:  # noqa: BLE001 — a failure costs the line its answer, never the session its brief
+        log(f"backup line: {type(e).__name__}: {e}")
+        return None
 
 
 def cmd_end(payload: dict) -> int:
@@ -1052,20 +1132,25 @@ def distribute(root: Path, f: Path, ep_text: str, so: dict, scope: str, read_by_
     so = {**so, "decisions": as_items(so.get("decisions"), "text", "quote"),
           **{k: as_items(so.get(k), "text", "verdict", "compared", "quote") for k in ("proposals", "lessons")}}
     so = vet(so, *read_by_model, *memory[1:])
-    append(f, render_summary(so, scope, version))
+    # The model may name a link that does not open here: in each file it lands in, such a link is written as code
+    g, here = link_graph(root), note_path(f)
+    append(f, unlink_unresolved(render_summary(so, scope, version), here, g))
     if scrub_notes:
         append(f, "\n" + "\n".join(f"> {n}" for n in scrub_notes) + "\n")
     fields = {"needs_reconcile": "true", "summarized_at": iso()}
     if not fm_get(ep_text, "title"):
-        fields["title"] = so.get("title")
+        title = so.get("title")
+        fields["title"] = unlink_unresolved(title, here, g, value=True) if isinstance(title, str) else title
     if not fm_get(ep_text, "closed_by"):
         fields["closed_by"] = "auto"
     update_fields(f, **fields)
-    written = upsert_progress_entry(root, f.stem, render_progress_entry(ep_text, f.stem, so))
+    written = upsert_progress_entry(root, f.stem, unlink_unresolved(render_progress_entry(ep_text, f.stem, so),
+                                                                    "progress.md", g))
     if not written:
         append(f, "\n> ⚠ `progress.md`-ის ჟურნალში ჩანაწერი ვერ ჩაიწერა (მიზეზი — episodic.log-ში); `/session-close` "
                   "შეაჯერებს.\n")
-    n = append_proposals(root, f.stem, [c.get("text") for c in so.get("proposals") or [] if c.get("verdict") == "new"])
+    n = append_proposals(root, f.stem, [unlink_unresolved(str(c.get("text") or ""), "memory/PROPOSALS.md", g)
+                                        for c in so.get("proposals") or [] if c.get("verdict") == "new"])
     log(f"summarize {f.stem}: ok ({scope}); progress entry {'written' if written else 'NOT written'}; {n} proposal(s) added")
 
 
@@ -1232,6 +1317,18 @@ def hand_to_summarizer(root: Path, f: Path, why: str, payload: dict, **fields: s
     return spawn_detached(["summarize", str(pfile)])
 
 
+def last_activity(p: Path, tp: str) -> float:
+    """When an open episode's session last did anything. The episode is written only at start, compact and end, so a
+    session that talks for hours with no compact has an old episode and a fresh transcript: it is live (the
+    catch-up closed two live sessions on 2026-11-08). No transcript at that path, no live session: the episode decides.
+    Any other refusal reaches the catch-up's handler: the episode is left for the next start, never closed unjudged."""
+    t = p.stat().st_mtime
+    try:
+        return max(t, os.stat(tp).st_mtime)
+    except FileNotFoundError:
+        return t
+
+
 def catchup(root: Path, current_sid: str, transcript_dir: Path | None) -> list[str]:
     """Close + summarise episodes left open by sessions that died (power cut, killed window);
     remove the stubs of idle sessions in which nothing was ever said; and give an episode to a session that ran
@@ -1248,9 +1345,11 @@ def catchup(root: Path, current_sid: str, transcript_dir: Path | None) -> list[s
             text = read(p)
             if fm_get(text, "status") != "open" or (current_sid and p.stem.endswith(sid8(current_sid))):
                 continue
-            idle_h = (now().timestamp() - p.stat().st_mtime) / 3600
             tp = fm_get(text, "transcript")
-            if idle_h < hours or not tp:
+            if not tp:
+                continue
+            idle_h = (now().timestamp() - last_activity(p, tp)) / 3600
+            if idle_h < hours:
                 continue
             if empty_session(text, tp):
                 remove_empty_stub(root, p, "catch-up")
@@ -1289,6 +1388,8 @@ def cmd_status(sid: str) -> int:
     print(f"open_proposals: {open_proposals(root)}")
     engine = engine_now(root, read(f) if f and f.exists() else "")
     print(f"engine: {'INCONCLUSIVE — git could not say what changed' if engine is None else engine or '-'}")
+    backup = backup_now(root)
+    print(f"backup: {'INCONCLUSIVE — git could not say what is uploaded' if backup is None else backup or '-'}")
     return 0
 
 

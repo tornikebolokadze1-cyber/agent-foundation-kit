@@ -2,7 +2,8 @@
 id: GUIDE-automation
 type: guide
 title: ავტომატიზაციის სახელმძღვანელო
-updated: 2026-10-11
+updated: 2026-11-08
+code: [src, tests]
 ---
 
 # ავტომატიზაციის სახელმძღვანელო
