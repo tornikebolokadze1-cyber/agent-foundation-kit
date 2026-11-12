@@ -31,7 +31,7 @@ enabled = true
 builtin = "graph"
 pre_commit = true
 stop = true
-what = "knowledge graph: links resolve, frontmatter valid, statuses legal, approval chain, owner ledger"
+what = "knowledge graph: links resolve, frontmatter valid, statuses legal, approval chain, owner ledger; the bridges (ADR-0018 §2) — receipts' commits and files, the ids task lines, plan tasks, requirements and code comments name — exist: an error in a file the commit changes, a warning in an older one"
 
 [[gate]]
 id = "json"
@@ -116,11 +116,20 @@ stop = false  # one number for the whole project: belongs at commit; the guard (
 what = "the text every session loads (CLAUDE.md and its imports, unscoped rules, skill and agent listings) stays within max_bytes; only the owner raises it (`/approve budget N`)"
 
 [[gate]]
+id = "memory"
+level = 0
+enabled = true
+builtin = "memory"
+pre_commit = true
+stop = false  # the whole top layer at once: belongs at commit, not the per-session Stop hook (L-007)
+what = "the top layer every session trusts (memory/LESSONS.md and the auto blocks of progress.md, plan.md and tasks/todo.md): a named commit exists, a path exists, a D-/P-/L- number is in its register, a drill group exists, and no block is too long for the start brief (ADR-0017)"
+
+[[gate]]
 id = "drill"
 level = 0
 enabled = true
 builtin = "drill"
-floor = 1144
+floor = 1291
 pre_commit = true
 stop = false
 what = "tools/gates/drill.py: every guard, hook and gate is broken on purpose and must catch it, and the drill holds exactly `floor` cases (ARMED plus ELSEWHERE): the floor rises with the drill, only the owner lowers it (`/approve floor N`, ADR-0015)"

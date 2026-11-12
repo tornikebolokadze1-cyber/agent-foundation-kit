@@ -34,6 +34,7 @@ rule).
 | `tools/approve.py` | the owner's approval — never run it yourself |
 | `tools/gates/` | deterministic gates (`gate.py`, `gates.toml`) and their drill |
 | `tools/observe.py` | the observatory: what agents did, read from Claude Code's transcripts (`/observatory`) |
+| `tools/recall.py` | search this project's own transcripts and episodes for a phrase: who said it and when, keys redacted, output fenced as data (ADR-0017) |
 | `tools/cache_cost.py`, `tools/model_prices.toml` | what the sessions cost: prompt-cache use, rebuilds and their causes, at API list prices (ADR-0010) |
 | `.claude/hooks/statusline.py` | the status line: the owner's line, the stage, the prompt cache's expiry (ADR-0010, ADR-0011) |
 | `.claude/hooks/firstrun.py` | the first session start in a new project: git repository, commit checks, tool check (ADR-0011) |

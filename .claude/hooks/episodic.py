@@ -7,7 +7,8 @@ Wired in .claude/settings.json through .claude/hooks/py.sh (hook JSON on stdin):
   SessionStart startup|resume|clear|compact -> episodic.py start
       Opens this session's episode (memory/episodes/EP-<date>-<sid8>.md) and prints
       the working memory — progress.md "ახლა" + plan.md current phase + tasks/todo.md
-      "now/next" + session facts (among them the backup line, tools/backup_line.py) —
+      "now/next" + session facts (among them the backup line, tools/backup_line.py, and
+      the live-probe line when the project keeps tools/live_probes.toml) —
       as additionalContext. The `compact` source re-injects it after every compaction.
       Also starts catch-up summaries for episodes that were never closed (power cut), and gives an episode to a
       session that ran without this engine's SessionStart (L-020: a transcript with no episode, or one that
@@ -19,11 +20,15 @@ Wired in .claude/settings.json through .claude/hooks/py.sh (hook JSON on stdin):
       appends the model-written compact_summary to the episode; in a subagent's → skipped.
   SessionEnd -> episodic.py end
       Closes the episode in well under a second, then hands the slow part to a
-      DETACHED child (`summarize`), because SessionEnd hooks share a 1.5 s budget.
+      DETACHED child (`summarize`), because SessionEnd hooks share a 1.5 s budget. The child first writes
+      the episode's actions block (ADR-0018 §3: the files the session changed and read, its commits, gates,
+      guard and sentinel codes and cost — paths and numbers only, read by tools/observe.py's code), then
+      the summary.
 
   Owner/agent commands:
     episodic.py status <session_id>   facts for /session-close (episode path, times, reconcile list, the engine
                                       and backup lines)
+    episodic.py actions <session_id>  /session-close: write (or rewrite) this session's actions block
     episodic.py index                 regenerate memory/episodes/INDEX.md
     episodic.py summarize <payload>   the detached child (not for manual use)
     episodic.py compact-verify <payload>  the detached child of PostCompact (not for manual use)
@@ -66,6 +71,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
@@ -94,6 +100,7 @@ BRIEF_CHARS = 9_000           # cap on the whole brief: Claude Code keeps a hook
 BLOCK_CAPS = {"progress.md": 1_800, "plan.md": 2_200, "tasks/todo.md": 2_600}
 RECONCILE_SHOWN = 10          # sessions to reconcile named in the brief; INDEX.md and `episodic.py status` list them all
 FACT_CHARS = 150              # a title in the brief's facts — model-written, so no longer than this
+REFLECT_EVERY = 5             # sessions closed since the last /reflect before the brief reminds to dream (ADR-0017 §4)
 TRANSCRIPT_CHARS = 60_000     # cap on transcript text handed to the summariser: its opening and its end
 HEAD_CHARS = 15_000           # of that, the opening — why the session began; the rest goes to its end
 MESSAGE_CHARS = 8_000         # one message longer than this keeps its start and its end
@@ -113,6 +120,10 @@ CLOSE_HEADING_RE = re.compile(r"(?m)^## დახურვა — (\S+)")  # cmd
 START_GIT_RE = re.compile(r"(?m)^- git: `[^`\n]*` @ `([^`\n]+)`")  # the first is ensure_episode's: where it began
 ENGINE_RE = re.compile(r"(?m)^- ძრავა: (.+)$")  # cmd_end's engine line (ADR-0015)
 ENGINE_FACT_CHARS = 400       # the engine line in the brief's facts; the episode keeps it whole
+PROBES_FILE = "tools/live_probes.toml"  # live probes and the Claude Code each ran on; a kit project has none
+VERSION_RE = re.compile(r"\b\d{1,4}\.\d{1,4}\.\d{1,4}\b")  # a Claude Code version, as `claude --version` prints it
+VERSION_TIMEOUT_S = 10
+VERSIONS_SHOWN = 3            # versions the live-probe fact names; the brief's facts are never cut, so it stays short
 
 # The intake contract: every proposal and lesson comes with a verdict, the ids it was compared with and a
 # quote the machine can find; every decision with a quote that tells whose decision it was.
@@ -146,6 +157,12 @@ SUMMARY_SCHEMA = {
     "additionalProperties": False,
 }
 
+# ADR-0017 §5: the summarizer is told what memory is for, not how to use it. /session-close carries the same paragraph,
+# and the drill holds both to it word for word (L-018).
+MEMORY_PURPOSE = """რისთვისაა მეხსიერება: რომ შემდეგმა სესიამ ერთი და იგივე თავიდან აღარ გამოიკვლიოს. ამიტომ
+ჩაწერე წესი, მისი საბუთი — ბრძანება, commit ან ციტატა, რომლითაც ვიცით, რომ ის მართალია — და ნაპოვნი ხაფანგი. ნუ
+გადაწერ იმას, რასაც git, ფაილები ან ეკრანი ისედაც აჩვენებს."""
+
 SUMMARY_PROMPT = """შენ ხარ პროექტის ეპიზოდური მეხსიერების მწერალი. stdin-ში არის Claude Code-ის ერთი სესიის
 ჩანაწერი (მომხმარებლის [user] და ასისტენტის [assistant] ტექსტი; [summary] — Claude Code-ის მიერ სესიის შეკუმშვისას
 დაწერილი შეჯამება, არა მომხმარებლის სიტყვები; გრძელი სესიიდან — დასაწყისი და ბოლო, ხოლო რამდენი გამოტოვდა შუაში,
@@ -157,6 +174,7 @@ SUMMARY_PROMPT = """შენ ხარ პროექტის ეპიზო
 - next_step: ერთი კონკრეტული შემდეგი ნაბიჯი;
 - proposals: მხოლოდ თუ საუბრიდან ახალი skill / ADR / spec / gate გამოიკვეთა, სხვაგვარად ცარიელი სია;
 - lessons: მხოლოდ განმეორებადი გაკვეთილი (შეცდომა, რომელიც აღარ უნდა განმეორდეს), სხვაგვარად ცარიელი.
+""" + MEMORY_PURPOSE + """
 quote — ზუსტი ციტატა ჩანაწერიდან, სიტყვასიტყვით გადმოწერილი (20-200 სიმბოლო), რომელზეც პუნქტი დგას. ციტატას
 მანქანა ამოწმებს: თუ ის ჩანაწერში სიტყვასიტყვით არ წერია, პუნქტი არ მიიღება. გადაწყვეტილება მფლობელისად
 მხოლოდ მაშინ ჩაითვლება, როცა მისი ციტატა მომხმარებლის ([user]) ტექსტიდანაა — ასისტენტის შეთავაზება
@@ -481,6 +499,30 @@ def reconcile_list(root: Path) -> list[str]:
         if fm_get(read(p), "needs_reconcile").lower() == "true":
             out.append(p.stem)
     return out
+
+
+def reflect_due(root: Path, closed: list[Path]) -> tuple[int, bool] | None:
+    """(sessions closed since the last /reflect, whether one is recorded at all) once there are REFLECT_EVERY of them,
+    else None. `episodic.py reflected <session>` records a run as `reflected_at` in the episode of the session that
+    ran it; that session's own close is not counted (ADR-0017 §4)."""
+    marks = []
+    for p in all_episodes(root):
+        t = parse_time(fm_get(read(p), "reflected_at"))
+        if t:
+            marks.append((t, p))
+    last_t, last_p = max(marks) if marks else (None, None)
+    since = [p for p in closed if p != last_p and (last_t is None or closed_when(p)[0] > last_t)]
+    return (len(since), last_p is not None) if len(since) >= REFLECT_EVERY else None
+
+
+def reflect_hint(props: int, due: tuple[int, bool] | None) -> str:
+    """The end of the brief's proposals line. When /reflect is due its reminder takes the place of the proposals hint
+    — /reflect presents the proposals too — so the facts at their longest still leave the blocks whole (ADR-0017)."""
+    if due:
+        n, recorded = due
+        return ((f" — 🔁 ბოლო `/reflect`-იდან {n} სესია დაიხურა" if recorded else
+                 f" — 🔁 `/reflect` არ ჩაწერილა, დაიხურა {n} სესია") + ": შესაფერის მომენტში გაუშვი (ADR-0017)")
+    return " — შესაფერის მომენტში შესთავაზე მფლობელს გადაწყვეტილება" if props else ""
 
 
 def regen_index(root: Path) -> Path:
@@ -825,12 +867,14 @@ def cmd_start(payload: dict) -> int:
     last = max(closed, key=closed_when) if closed else None
     rec = reconcile_list(root)
     props = open_proposals(root)
+    due = reflect_due(root, closed)
     engine = (ENGINE_RE.findall(read(last)) or [""])[-1] if last else ""
     backup = backup_now(root)
+    probes = probes_now(root)
     facts = [
         f"- ეს სესია: `{f.relative_to(root).as_posix()}` — compact-ები: {compacts}" if f else "- ეპიზოდი ვერ შეიქმნა (იხ. episodic.log)",
         f"- ბოლო დახურული სესია: [[{last.stem}]] — {fm_get(read(last), 'title')[:FACT_CHARS] or 'უსათაურო'}" if last else "- ბოლო დახურული სესია: —",
-        f"- ღია წინადადებები (`memory/PROPOSALS.md`): {props}" + (" — შესაფერის მომენტში შესთავაზე მფლობელს გადაწყვეტილება" if props else ""),
+        f"- ღია წინადადებები (`memory/PROPOSALS.md`): {props}" + reflect_hint(props, due),
     ]
     if rec:  # the facts are never cut, so each of them stays short: the list names its first few, the index all
         more = len(rec) - RECONCILE_SHOWN
@@ -844,6 +888,8 @@ def cmd_start(payload: dict) -> int:
         facts.append("- 💾 ბექაფი: ვერ შემოწმდა — git-მა ვერ თქვა, რა არის ატვირთული")
     elif backup:
         facts.append(f'- {backup} — ერთი წინადადებით უთხარი მფლობელს; ატვირთვა — მხოლოდ მისი „კი"-თ')
+    if probes:
+        facts.append(probes)
     if started:
         facts.append(f"- ფონურად იწყება დაუხურავი სესიების შეჯამება: {', '.join(started)}")
     if compacts >= 3:
@@ -1026,6 +1072,56 @@ def backup_now(root: Path) -> str | None:
     except Exception as e:  # noqa: BLE001 — a failure costs the line its answer, never the session its brief
         log(f"backup line: {type(e).__name__}: {e}")
         return None
+
+
+def claude_version() -> tuple[str, str]:
+    """(the version `claude --version` prints, "") — or ("", why it named none)."""
+    base = find_claude()
+    if not base:
+        return "", "claude ვერ მოიძებნა"
+    try:
+        r = run_child([*base, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                      timeout=VERSION_TIMEOUT_S, env=claude_cli.nested_env())
+    except subprocess.TimeoutExpired:
+        return "", f"{VERSION_TIMEOUT_S} წამში არ უპასუხა"
+    except (OSError, subprocess.SubprocessError) as e:
+        return "", type(e).__name__
+    found = VERSION_RE.search(r.stdout or "") if r.returncode == 0 else None
+    return (found.group(0), "") if found else ("", f"exit {r.returncode}, ვერსია არ დაასახელა")
+
+
+def probe_fact(root: Path) -> str:
+    """A live probe is a check no drill can make, run by hand against the real Claude Code (L-009): its result holds for
+    the version it ran on, and PROBES_FILE names that version for each probe. "" when the project keeps no such
+    file (a project made from the kit) or every probe ran on the Claude Code that runs now; otherwise one short fact —
+    the versions, or why they could not be compared (rules/23: a comparison that could not run says so)."""
+    p = root / PROBES_FILE
+    if not p.exists():
+        return ""
+    try:
+        ran = [str(probe["claude_code"]) for probe in tomllib.loads(read(p))["probe"]]
+        if not ran or not all(VERSION_RE.fullmatch(v) for v in ran):
+            raise ValueError('every [[probe]] needs claude_code = "X.Y.Z"')
+    except (OSError, tomllib.TOMLDecodeError, KeyError, TypeError, ValueError) as e:
+        return f"- 🧪 ცოცხალი ზონდების ფაილი `{PROBES_FILE}` ვერ წავიკითხე ({shorten(f'{type(e).__name__}: {e}', 80)})"
+    now_v, why = claude_version()
+    if not now_v:
+        return f"- 🧪 ცოცხალი ზონდების ვერსია ვერ შემოწმდა — `claude --version`: {shorten(why, 60)}"
+    stale = [v for v in ran if v != now_v]
+    if not stale:
+        return ""
+    old = sorted(set(stale), key=lambda v: tuple(map(int, v.split("."))))
+    named = ", ".join(old[:VERSIONS_SHOWN]) + (" …" if len(old) > VERSIONS_SHOWN else "")
+    return (f"- 🧪 {len(stale)} ცოცხალი ზონდი Claude Code-ის სხვა ვერსიაზე ჩატარდა ({named}), ახლა კი {now_v} მუშაობს "
+            f'— მფლობელს შესთავაზე გამეორება (ფასიანია, მხოლოდ მისი „კი"-თ); სია — `{PROBES_FILE}`')
+
+
+def probes_now(root: Path) -> str:
+    try:
+        return probe_fact(root)
+    except Exception as e:  # noqa: BLE001 — a failure costs the fact its answer, never the session its brief
+        log(f"live probes: {type(e).__name__}: {e}")
+        return "- 🧪 ცოცხალი ზონდების ვერსია ვერ შემოწმდა — იხ. episodic.log"
 
 
 def cmd_end(payload: dict) -> int:
@@ -1234,6 +1330,61 @@ def hooks_note(tr: Transcript, payload: dict) -> str:
     return ""
 
 
+ACTIONS_BLOCK_RE = re.compile(r"<!-- auto: actions:start -->.*?<!-- auto: actions:end -->\n?", re.S)
+
+
+def actions_text(root: Path, tp: str) -> tuple[str, str]:
+    """The episode's actions block from the session's transcript and its subagents' (ADR-0018 §3, read by the code
+    tools/observe.py reads it with), and one line saying what it holds. A transcript that is missing or holds no line
+    in a known shape gives the block that says so."""
+    import observe  # here, not at the top: SessionStart, which runs on every session, never needs it
+    if not tp or not os.path.isfile(tp):
+        why = "სესიის ჩანაწერის ფაილი ვერ მოიძებნა"
+        return observe.actions_unread(why), f"actions: INCONCLUSIVE — {why}; the block says so"
+    r = observe.build([Path(tp)], root.resolve())
+    if not r.known:
+        why = f"{r.lines} ხაზიდან ვერცერთი ვერ ამოვიცანი (Claude Code-მა ფორმატი შეცვალა?)"
+        return observe.actions_unread(why), f"actions: INCONCLUSIVE — {why}; the block says so"
+    block = observe.actions_block(r, root.resolve())
+    acts = observe.graph_layers.read_actions(block)
+    return block, (f"actions: {len(acts.changed) if acts else 0} file(s) changed, {len(acts.read) if acts else 0} "
+                   f"read (named), {len(acts.commits) if acts else 0} commit(s)")
+
+
+def write_actions(root: Path, f: Path, tp: str) -> str:
+    """Write — or rewrite in place — the episode's actions block. Never raises: a failure is logged and said."""
+    try:
+        block, said = actions_text(root, tp)
+        with locked(f) as held:
+            if not held:
+                return "actions: INCONCLUSIVE — the episode is being written by another process; nothing written"
+            text = read(f)
+            if ACTIONS_BLOCK_RE.search(text):
+                text = ACTIONS_BLOCK_RE.sub(lambda _m: block, text, count=1)
+            else:  # a start marker left without its end is dropped, so the reader never mixes two blocks
+                kept = [x for x in text.split("\n") if x.strip() != "<!-- auto: actions:start -->"]
+                text = "\n".join(kept).rstrip("\n") + "\n\n" + block
+            write_atomic(f, text)
+        log(f"actions {f.stem}: {said}")
+        return f"{said} — {note_path(f)}"
+    except Exception as e:  # noqa: BLE001 — never block a session
+        log(f"actions {f.stem} FAILED: {type(e).__name__}: {e}")
+        return f"actions: INCONCLUSIVE — {type(e).__name__}; nothing written (see episodic.log)"
+
+
+def cmd_actions(sid: str) -> int:
+    """/session-close: write this session's actions block (ADR-0018 §3). Exit 2 when there is no episode, or when the
+    transcript could not be read — the block then says so."""
+    root = root_dir()
+    f = episode_for(root, sid) if sid else None
+    if f is None or not f.exists():
+        print(f"actions: INCONCLUSIVE — no episode for session {sid or '(none given)'}; nothing written")
+        return 2
+    said = write_actions(root, f, fm_get(read(f), "transcript"))
+    print(said)
+    return 2 if said.startswith("actions: INCONCLUSIVE") else 0
+
+
 def cmd_summarize(pfile: str) -> int:
     """The detached child SessionEnd / catch-up spawn: summarise one closed episode, then clean up."""
     payload = json.loads(Path(pfile).read_text(encoding="utf-8"))
@@ -1241,6 +1392,8 @@ def cmd_summarize(pfile: str) -> int:
     f = Path(payload.get("episode") or episode_for(root, payload.get("session_id") or ""))
     try:
         if f.exists():
+            # the session's actions first: no model, and kept even when the summary is not made (ADR-0018 §3)
+            write_actions(root, f, payload.get("transcript_path") or fm_get(read(f), "transcript"))
             summarize_episode(root, f, payload)
         else:
             log(f"summarize: episode missing {f}")
@@ -1393,6 +1546,21 @@ def cmd_status(sid: str) -> int:
     return 0
 
 
+def cmd_reflected(sid: str) -> int:
+    """/reflect ran in this session: its episode records when (`reflected_at`, UTC, the machine's clock), and the start
+    brief counts the sessions closed from there (ADR-0017 §4). Exit 2 when the session has no episode — nothing is
+    written then."""
+    root = root_dir()
+    f = episode_for(root, sid) if sid else None
+    if f is None or not f.exists():
+        print(f"reflected: INCONCLUSIVE — no episode for session {sid or '(none given)'}; nothing recorded")
+        return 2
+    stamp = now().astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    update_fields(f, reflected_at=stamp)
+    print(f"reflected_at: {stamp} — {f.relative_to(root).as_posix()}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     cmd = argv[1] if len(argv) > 1 else "start"
     if os.environ.get("EPISODIC_NESTED") == "1" and cmd in ("start", "compact", "end"):
@@ -1411,6 +1579,10 @@ def main(argv: list[str]) -> int:
             return cmd_compact_verify(argv[2])
         if cmd == "status":
             return cmd_status(argv[2] if len(argv) > 2 else "")
+        if cmd == "reflected":
+            return cmd_reflected(argv[2] if len(argv) > 2 else "")
+        if cmd == "actions":
+            return cmd_actions(argv[2] if len(argv) > 2 else "")
         if cmd == "index":
             print(regen_index(root_dir()))
             return 0
@@ -1418,6 +1590,9 @@ def main(argv: list[str]) -> int:
         return 0
     except Exception as e:  # never block a session
         log(f"{cmd} FAILED: {type(e).__name__}: {e} (session={payload.get('session_id')})")
+        if cmd in ("reflected", "actions"):  # the agent's own commands: a run that broke must not read as done
+            print(f"{cmd}: INCONCLUSIVE — {type(e).__name__}; nothing recorded (see episodic.log)")
+            return 2
         return 0
 
 

@@ -19,7 +19,9 @@ At every session start and after every compaction, the SessionStart hooks inject
 step, progress.md "ახლა", plan.md's current phase, tasks/todo.md "now / next", this session's episode path, the last
 closed session, open proposals, sessions that need reconciling, the compaction count, and the context-graph brief
 (errors + what waits for the owner). Start from it — do not re-derive it. If the brief shows graph errors, fix them
-first.
+first. When a summary lacks a detail — what the person said, a number, a decision — look it up instead of guessing:
+`bash .claude/hooks/py.sh tools/recall.py "<phrase>"` searches this project's transcripts and episodes (exit 1 = not
+found, which never proves it did not happen).
 
 Claude Code compacts the conversation by itself when the context fills. The status line shows `↻N` = compactions in this
 session; at 3 it turns red — a summary of a summary is no longer reliable memory: run `/session-close`,
@@ -38,7 +40,7 @@ conversation: for a new topic recommend `/session-close` and a new session.
 | `/adr` | a hard-to-reverse or cross-cutting decision is being made |
 | `/session-close` | the session ends ("დავასრულოთ"), before `/clear`, or at ↻3 |
 | `/observatory` | the owner asks what the agents did, wants an audit or the security events |
-| `/reflect` | every few sessions, or after a repeated mistake — proposes improvements |
+| `/reflect` | every few sessions (the brief reminds after five), or after a repeated mistake — proposes improvements and checks the top layer against the records |
 | `/approve` | **owner only** — you cannot invoke it; remind the owner of the exact command |
 | `/orchestrate` | **owner only** — status of the maker–checker loops |
 
