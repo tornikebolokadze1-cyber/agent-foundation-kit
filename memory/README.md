@@ -11,7 +11,7 @@ title: მეხსიერების რუკა — რა სად ი�
 | ფენა | ფაილი | ვინ წერს | როდის იტვირთება |
 |---|---|---|---|
 | სამუშაო | [[progress]] „ახლა" + [[plan]] მიმდინარე ფაზა + [[todo]] „ახლა / შემდეგი" (`<!-- auto -->` ბლოკები) | `/session-close`; [[todo]]-ს — აგენტი მუშაობისას | ავტომატურად: ყოველ SessionStart-ზე და ყოველი compact-ის შემდეგ |
-| ეპიზოდური | `memory/episodes/EP-*.md` + [[memory/episodes/INDEX]] | hook-ები (დაწყება, compact, დახურვა) + `/session-close` | მოთხოვნით; INDEX — პირველი |
+| ეპიზოდური | `memory/episodes/EP-*.md` + [[memory/episodes/INDEX]] | hook-ები (დაწყება, compact, დახურვა) + `/session-close`; ბლოკს „მოქმედებები" — მხოლოდ გზები და რიცხვები — `episodic.py` წერს სესიის ჩანაწერიდან ([[ADR-0018-agentic-graph-layers-and-bridges]] §3) | მოთხოვნით; INDEX — პირველი; ბლოკს — გრაფიც |
 | სემანტიკური | [[intent]], `docs/specs/`, `docs/adr/`, `docs/domain/` | `/intent`, `/spec`, `/adr` + მფლობელის `/approve` | გრაფით ([[ADR-0003-context-graph-obsidian]]) |
 | პროცედურული | `.claude/skills`, `.claude/agents`, `.claude/rules`, `.claude/hooks`, [[REVIEW]], `tools/gates/` | მფლობელის თანხმობით | skill — გამოძახებისას; rule — შესაბამისი ფაილის წაკითხვისას |
 | პერსპექტიული | [[PROPOSALS]] + [[plan]] backlog | აგენტი წერს წინადადებას, მფლობელი წყვეტს | რაოდენობა — ყოველ SessionStart-ზე |

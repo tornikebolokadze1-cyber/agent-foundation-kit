@@ -19,11 +19,12 @@ succeeds and prints nothing; the drill must then report DEAD, otherwise it is a 
 Exit 0 = all ARMED · 1 = DEAD (a defect went uncaught) or DEFECT (a control failed) · 2 = INCONCLUSIVE.
 The last line counts ARMED and ELSEWHERE — cases only another system runs, see elsewhere_cases() —, and the drill gate holds
 their sum to exactly `floor` in tools/gates/gates.toml: a new case raises the floor in the same commit (ADR-0015).
-Groups: graph, approve, guard, sentinel, observe, episodic, stop, gates, budget, findings, orchestration, decision, wiring, firstrun,
-statusline (the engine's status line always; the owner's global one too when --statusline names it). The decision
-group needs orchestration/decide.py: a copy without the dispatcher says so and leaves the group out — asked for by
-name, it is INCONCLUSIVE. DRILL_GROUPS replaces the full list a run without --only drills (a group the copy lacks is
-then left out, as in a full run).
+Groups: graph, approve, guard, sentinel, observe, episodic, stop, gates, engine, budget, findings, orchestration, decision,
+wiring, firstrun, statusline (the engine's status line always; the owner's global one too when --statusline names it).
+The decision group needs orchestration/decide.py: a copy without the dispatcher says so and leaves the group out — asked
+for by name, it is INCONCLUSIVE. DRILL_GROUPS replaces the full list a run without --only drills (a group the copy lacks
+is then left out, as in a full run). A name that is no group — in --only or in DRILL_GROUPS — stops the run before
+anything is drilled: DRILL-UNKNOWN-GROUP, exit 2.
 """
 from __future__ import annotations
 
@@ -165,7 +166,7 @@ def write(p: Path, text: str) -> Path:
 
 def make_vault(root: Path) -> Path:
     write(root / "intent.md", FM.format(body="id: intent\ntype: intent\ntitle: Drill intent\nstatus: draft\nupdated: 2026-01-01\n")
-          + "# Intent\n\nG1 — demo goal. See [[plan]] and [[ADR-0001-demo]].\n")
+          + "# Intent\n\nG1 — demo goal. See [[plan]] and [[ADR-0001-demo]].\n\n| ID | მიზანი |\n|---|---|\n| G1 | demo goal |\n")
     write(root / "plan.md", FM.format(body="id: plan\ntype: roadmap\ntitle: Drill roadmap\nstatus: living\nupdated: 2026-01-01\n")
           + "# Roadmap\n\n<!-- auto: current-phase:start -->\n## მიმდინარე ფაზა: DRILL-PHASE\n- [ ] თესტი\n"
           "<!-- auto: current-phase:end -->\n")
@@ -174,7 +175,8 @@ def make_vault(root: Path) -> Path:
           "<!-- auto: current-state:end -->\n\n<!-- auto: log:start -->\n<!-- auto: log:end -->\n")
     write(root / "docs/specs/SPEC-0001-demo.md", FM.format(
         body='id: SPEC-0001\ntype: spec\ntitle: Demo spec\nstatus: draft\ncreated: 2026-01-01\nupdated: 2026-01-01\nintent: "[[intent]]"\n')
-        + "# SPEC-0001\n\nREQ-001 → G1.\n")
+        + "# SPEC-0001\n\nREQ-001 → G1.\n\n| ID | მოთხოვნა | მიზანი | პრიორიტეტი |\n|---|---|---|---|\n"
+        "| REQ-001 | demo requirement | G1 | must |\n")
     write(root / "docs/plans/PLAN-0001-demo.md", FM.format(
         body='id: PLAN-0001\ntype: plan\ntitle: Demo plan\nstatus: draft\ncreated: 2026-01-01\nupdated: 2026-01-01\nspec: "[[SPEC-0001-demo]]"\n')
         + "# PLAN-0001\n\n## 2. ამოცანები\n\n- [ ] T1 — first task (REQ-001)\n- [ ] T2 — second task\n\n## გადახრები\n\n")
@@ -310,6 +312,638 @@ def g_graph(tmp: Path, vault: Path) -> None:
     g_graph_spec(tmp, vault)
     g_graph_ledger(tmp, vault)
     g_graph_stage(tmp, vault)
+    g_graph_bridges(tmp, vault)
+    g_graph_actions(tmp, vault)
+    g_graph_code(tmp, vault)
+
+
+def g_graph_bridges(tmp: Path, vault: Path) -> None:
+    """ADR-0018 §2: the bridges — a commit → the files it changed and the task its first line names; a task line → its
+    receipt and the ids it names; a plan's task → the spec's requirement and criterion; a requirement → the intent's goal;
+    a code comment → the ids it cites — and the views that walk them (query, why, impact), each ending with the coverage
+    line. A bridge whose target is not there is an error in a file the next commit changes and a warning in an older one;
+    one git could not check is a warning, never a pass."""
+    b = fresh(tmp, "graph-bridges", vault)
+    write(b / "src/app.py", '"""The demo app."""\n# carries out SPEC-0001 (PLAN-0001 T1)\nx = 1\n')
+    edit(b / "docs/plans/PLAN-0001-demo.md", "first task (REQ-001)", "first task (REQ-001, AC-001)")
+    edit(b / "docs/specs/SPEC-0001-demo.md", "| REQ-001 | demo requirement | G1 | must |\n",
+         "| REQ-001 | demo requirement | G1 | must |\n\n| ID | კრიტერიუმი |\n|---|---|\n| AC-001 | demo criterion |\n")
+    open_line = "- [ ] D-002 — DRILL-TODO-ქართული (owner) — verify: look\n"
+    edit(b / "tasks/todo.md", open_line, open_line + "".join(f"- [ ] D-0{n} — queued task {n} (owner) — verify: look\n"
+                                                             for n in range(10, 18)))
+    git(b, "init", "-q", "-b", "main")
+    git(b, "add", "-A")
+    git(b, "commit", "-q", "-m", "CHECKPOINT: D-002 — demo")
+    short = run(["git", "-C", str(b), "rev-parse", "--short", "HEAD"])[1].strip()
+
+    def view(root: Path, *args: str, env: dict | None = None) -> tuple[int, str]:
+        rc, out, err = py("tools/context_graph.py", "--root", str(root), *args, env=env)
+        return rc, out + err
+
+    def seeded(name: str, rel: str, old: str, new: str) -> Path:
+        s = fresh(tmp, f"graph-bridges-{name}", b)
+        edit(s / rel, old, new)
+        return s
+
+    covered = "დაფარვა — commit-ები: 1, "
+    rc, out = view(b, "check")
+    expect(rc == 0 and "errors=0, warnings=0" in out and covered in out, "control: a commit, task lines, a plan's task, a "
+           "spec's rows, the intent's goal and a code comment that all resolve → graph OK with no bridge warning, and the "
+           "coverage line counts the one commit", out[-300:], kind="control")
+    rc, q = view(b, "query", "D-002")
+    expect(rc == 0 and re.search(rf"← {short} \(commit, [\d-]+\) CHECKPOINT: D-002 — demo \[task\]", q) is not None,
+           "bridges: query D-002 → the commit whose first line names it", q[-300:])
+    rc, w = view(b, "why", "src/app.py")
+    chain = (f"← {short} (commit, ", "[changed]", "→ D-002 (task, open)", "→ PLAN-0001 T1 (plan-task, open)", "[cites]",
+             "→ SPEC-0001 REQ-001 (requirement) demo requirement", "[req]", "→ G1 (goal) demo goal", "[goal]")
+    expect(rc == 0 and all(c in w for c in chain), "bridges: why src/app.py → the commit that changed it and the task it "
+           "names, the plan task its comment cites, that task's requirement and the requirement's goal", w[-400:])
+    rc, i = view(b, "impact", "SPEC-0001")
+    expect(rc == 0 and "← src/app.py [cites]" in i and re.search(r"← PLAN-0001 T1 \(plan-task, open\)[^\n]*\[req\]", i)
+           is not None, "bridges: impact SPEC-0001 → the code comment that cites it and the plan task built on its "
+           "requirement", i[-400:])
+    rc, out = view(b, "impact", "tasks/todo.md")
+    expect(rc == 0 and "… და კიდევ 4 [in]" in out and out.count("[in]") == 7, "bridges: impact of a register holding ten "
+           "task lines → six of them and „… და კიდევ 4\" — a short answer, never a silent cut", out[-300:])
+    last = [o.rstrip().splitlines()[-1] if o.strip() else "" for o in (q, w, i)]
+    expect(all(x.startswith(covered) for x in last), "bridges: query, why and impact each end with the coverage line — a "
+           "short answer is never taken for a complete one", " | ".join(last)[-300:])
+    done = "✓ 2026-01-01 · მფლობელი"
+    s = seeded("commit", "tasks/todo.md", done, "✓ 2026-01-01 · 0000001")
+    rc, out = view(s, "check")
+    expect(rc == 1 and re.search(r"ERROR\s+BRIDGE-COMMIT\s+tasks/todo\.md:\d+\s+D-001 cites commit 0000001", out)
+           is not None, "seeded: a receipt naming a commit this repository does not hold, in a file the next commit "
+           "changes → exit 1 with BRIDGE-COMMIT at its line", out[-300:])
+    git(s, "add", "-A")
+    git(s, "commit", "-q", "-m", "CHECKPOINT: records")
+    rc, out = view(s, "check")
+    expect(rc == 0 and re.search(r"WARNING\s+BRIDGE-COMMIT\s+tasks/todo\.md:\d+", out) is not None
+           and "a file this commit does not change" in out, "seeded: the same receipt once committed → a warning and "
+           "exit 0 (a squash may take a commit away, and history is not rewritten for a check)", out[-300:])
+    edit(s / "src/app.py", "x = 1\n", "x = 2\n")
+    git(s, "add", "src/app.py")
+    edit(s / "tasks/todo.md", "queued task 17", "queued task 17, renamed")  # on disk only: this commit does not take it
+    rc, out = gate(s, "--only", "graph", "--pre-commit")
+    expect(rc == 0 and re.search(r"PASS\s+graph", out) is not None and re.search(r"WARNING\s+BRIDGE-COMMIT", out)
+           is not None, "control: at commit, a broken receipt in a file the commit does not change (changed on disk, not "
+           "staged) → the graph gate passes and names the warning", out[-300:], kind="control")
+    s = seeded("staged", "tasks/todo.md", done, "✓ 2026-01-01 · 0000001")
+    git(s, "add", "tasks/todo.md")
+    edit(s / "tasks/todo.md", "✓ 2026-01-01 · 0000001", done)  # fixed on disk only: the commit records the staged text
+    rc, out = gate(s, "--only", "graph", "--pre-commit")
+    expect(rc == 1 and re.search(r"FAIL\s+graph", out) is not None and re.search(r"ERROR\s+BRIDGE-COMMIT", out)
+           is not None, "seeded: at commit, a staged receipt naming a commit that does not exist (fixed on disk only) → "
+           "graph FAIL with BRIDGE-COMMIT", out[-300:])
+    s = seeded("file-ok", "tasks/todo.md", done, "✓ 2026-01-01 · docs/adr/ADR-0001-demo.md")
+    rc, out = view(s, "check")
+    _, q = view(s, "query", "D-001")
+    expect(rc == 0 and "BRIDGE-FILE" not in out and "→ ADR-0001-demo (adr, proposed) Demo decision [receipt]" in q,
+           "control: a receipt naming a file that exists → no BRIDGE-FILE, and the task links to the file", (out + q)[-300:],
+           kind="control")
+    s = seeded("file", "tasks/todo.md", done, "✓ 2026-01-01 · docs/no-such-note.md")
+    rc, out = view(s, "check")
+    expect(rc == 1 and re.search(r"ERROR\s+BRIDGE-FILE\s+tasks/todo\.md:\d+\s+D-001's receipt names docs/no-such-note\.md",
+                                 out) is not None, "seeded: a receipt naming a file that does not exist → exit 1 with "
+           "BRIDGE-FILE", out[-300:])
+    s = seeded("comment", "src/app.py", "SPEC-0001 (PLAN", "SPEC-0009 (PLAN")
+    rc, out = view(s, "check")
+    expect(rc == 1 and re.search(r"ERROR\s+BRIDGE-ID\s+src/app\.py:2\s+a comment names SPEC-0009", out) is not None,
+           "seeded: a code comment citing a spec the project does not have → BRIDGE-ID at the comment's line", out[-300:])
+    s = seeded("docstring", "src/app.py", '"""The demo app."""', '"""The demo app.\n\nBuilt for SPEC-0009.\n"""')
+    rc, out = view(s, "check")
+    expect(rc == 1 and re.search(r"ERROR\s+BRIDGE-ID\s+src/app\.py:3\s+a comment names SPEC-0009", out) is not None,
+           "seeded: a docstring citing a spec the project does not have, on its third line → BRIDGE-ID at that line",
+           out[-300:])
+    s = seeded("goal", "docs/specs/SPEC-0001-demo.md", "| demo requirement | G1 |", "| demo requirement | G7 |")
+    rc, out = view(s, "check")
+    expect(rc == 1 and re.search(r"ERROR\s+BRIDGE-ID\s+docs/specs/SPEC-0001-demo\.md:\d+\s+SPEC-0001 REQ-001 names G7",
+                                 out) is not None, "seeded: a requirement naming a goal the intent does not have → "
+           "BRIDGE-ID", out[-300:])
+    s = seeded("criterion", "docs/plans/PLAN-0001-demo.md", "(REQ-001, AC-001)", "(REQ-001, AC-009)")
+    rc, out = view(s, "check")
+    expect(rc == 1 and re.search(r"ERROR\s+BRIDGE-ID\s+docs/plans/PLAN-0001-demo\.md:\d+\s+PLAN-0001 T1 names AC-009",
+                                 out) is not None, "seeded: a plan task naming a criterion its spec does not have → "
+           "BRIDGE-ID", out[-300:])
+    s = seeded("span", "tasks/todo.md", "DRILL-TODO-ქართული (owner)", "DRILL-TODO-ქართული, see `ADR-0100` (owner)")
+    rc, out = view(s, "check")
+    expect(rc == 0 and "BRIDGE-ID" not in out, "control: an id inside a code span (`ADR-0100`) is a name, not a bridge "
+           "→ no BRIDGE-ID", out[-300:], kind="control")
+    edit(s / "tasks/todo.md", "`ADR-0100`", "ADR-0100")
+    rc, out = view(s, "check")
+    expect(rc == 1 and re.search(r"ERROR\s+BRIDGE-ID\s+tasks/todo\.md:\d+\s+D-002 names ADR-0100", out) is not None,
+           "seeded: the same id written bare in a task line → BRIDGE-ID", out[-300:])
+    s = fresh(tmp, "graph-bridges-engine", b)
+    write(s / "tools/helper.py", "# D-999 and SPEC-0009 are the workshop's numbers\nx = 1\n")
+    rc, out = view(s, "check")
+    expect(rc == 0 and "BRIDGE-ID" not in out, "control: an engine file (tools/) citing a task and a spec number → no "
+           "bridge — in a project made from the kit they would name that project's own, unrelated records", out[-300:],
+           kind="control")
+    write(s / "tools/helper.py", "# ADR-0099 decided this\nx = 1\n")
+    rc, out = view(s, "check")
+    expect(rc == 1 and re.search(r"ERROR\s+BRIDGE-ID\s+tools/helper\.py:1\s+a comment names ADR-0099", out) is not None,
+           "seeded: an engine file citing a decision the project does not have → BRIDGE-ID", out[-300:])
+    s = fresh(tmp, "graph-bridges-nogit", vault)  # no repository here — and none above it either (GIT_CEILING_DIRECTORIES)
+    edit(s / "tasks/todo.md", done, "✓ 2026-01-01 · 1a2b3c4")
+    rc, out = view(s, "check", env={"GIT_CEILING_DIRECTORIES": str(tmp)})
+    expect(rc == 0 and re.search(r"WARNING\s+BRIDGE-GIT\s+tasks/todo\.md:\d+", out) is not None
+           and "commit-ები ვერ წავიკითხე (no git repository at" in out, "seeded: no git to read → a receipt's commit is a "
+           "BRIDGE-GIT warning (unchecked, never a pass), and the coverage line says the commits were not read", out[-300:])
+    edit(s / "tasks/todo.md", "DRILL-TODO-ქართული (owner)", "DRILL-TODO-ქართული, see ADR-0100 (owner)")
+    rc, out = view(s, "check", env={"GIT_CEILING_DIRECTORIES": str(tmp)})
+    expect(rc == 1 and re.search(r"ERROR\s+BRIDGE-ID\s+tasks/todo\.md:\d+\s+D-002 names ADR-0100", out) is not None,
+           "seeded: no git to tell which files the next commit changes → a broken bridge counts as one in a changed file: "
+           "an error, never a warning", out[-300:])
+    s = fresh(tmp, "graph-bridges-plan-commit", b)
+    edit(s / "src/app.py", "x = 1\n", "x = 2\n")
+    git(s, "add", "-A")
+    git(s, "commit", "-q", "-m", "CHECKPOINT: PLAN-0001 T1 — the app's first value")
+    second = run(["git", "-C", str(s), "rev-parse", "--short", "HEAD"])[1].strip()
+    rc, out = view(s, "query", "PLAN-0001 T1")
+    expect(rc == 0 and re.search(rf"← {second} \(commit, [\d-]+\) CHECKPOINT: PLAN-0001 T1 [^\n]*\[task\]", out) is not None,
+           "bridges: a commit whose first line names `PLAN-0001 T1` (the /feature-plan rule) → query of that plan task "
+           "shows the commit", out[-300:])
+    edit(s / "src/app.py", "x = 2\n", "x = 3\n")
+    git(s, "add", "-A")
+    git(s, "commit", "-q", "-m", "CHECKPOINT: PLAN-0009 T4 — a plan since removed")
+    rc, out = view(s, "check")
+    expect(rc == 0 and "errors=0, warnings=0" in out, "control: a commit naming a plan task the project no longer has → "
+           "no bridge problem (a commit's message is history)", out[-300:], kind="control")
+
+
+def g_graph_actions(tmp: Path, vault: Path) -> None:
+    """ADR-0018 §3: an episode's actions block. episodic.py writes it from the session's transcript with the code
+    tools/observe.py reads it with — the files the session changed and read inside the project, the commits git's own
+    output showed it, the gates it ran and their results, the guard's and the sentinel's codes, the cost — never a
+    command's text, a tool's output or a key; a path outside the project only as a number; for a transcript it could not
+    read, a block that says so, never an empty list. The graph reads the block back: session → file, session → commit,
+    and a commit the repository does not hold is checked the way a receipt's is."""
+    start, end = "<!-- auto: actions:start -->", "<!-- auto: actions:end -->"
+    a = fresh(tmp, "graph-actions", vault)
+    state, tdir = tmp / "graph-actions-state", tmp / "graph-actions-transcripts"
+    state.mkdir()
+    tdir.mkdir()
+    env = {"EPISODIC_STATE_DIR": str(state), "EPISODIC_AUTOSUMMARY": "0", "GIT_CEILING_DIRECTORIES": str(tmp)}
+    write(a / "src/app.py", "x = 1\n")
+    git(a, "init", "-q", "-b", "main")
+    git(a, "add", "-A")
+    run(["git", "-C", str(a), "-c", "user.name=drill", "-c", "user.email=drill@example.invalid", "-c",
+         "core.hooksPath=/nonexistent-drill-hooks", "commit", "-q", "-m", "CHECKPOINT: an old commit"],
+        env={"GIT_AUTHOR_DATE": "2020-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2020-01-01T00:00:00Z"})
+
+    def head(root: Path) -> str:
+        return run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"])[1].strip()
+
+    old = head(a)
+    write(a / "src/app.py", "x = 2\n")
+    git(a, "commit", "-q", "-am", "CHECKPOINT: D-002 — the session's commit")
+    made = head(a)
+    write(a / "src/app.py", "x = 3\n")
+    git(a, "commit", "-q", "-am", "CHECKPOINT: a commit only the model's own text names")
+    talked = head(a)
+    t0 = datetime.now(timezone.utc)
+    usage = {"input_tokens": 10, "output_tokens": 50, "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 0}
+
+    def at(i: int) -> str:
+        return (t0 + timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def says(i: int, *content: dict) -> str:  # the model: its own text and its tool calls
+        return transcript_line("assistant", at(i), message={"id": f"m{i}", "model": "claude-drill",
+                                                            "content": list(content), "usage": usage})
+
+    def tool(uid: str, name: str, **given: object) -> dict:
+        return {"type": "tool_use", "id": uid, "name": name, "input": given}
+
+    def answer(i: int, uid: str, content: object, error: bool = False) -> str:  # what a tool returned
+        return transcript_line("user", at(i), message={"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": uid, "content": content, "is_error": error}]})
+
+    def session(root: Path, sid: str, lines: list[str], sub: list[str] | None = None) -> tuple[Path, Path]:
+        tp = write(tdir / f"{sid}.jsonl", "\n".join(lines) + "\n")
+        if sub:
+            write(tdir / sid / "subagents" / "agent-a1.jsonl", "\n".join(sub) + "\n")
+        return tp, closed_episode(root, sid, tp)
+
+    def actions(root: Path, sid: str) -> tuple[int, str, str]:
+        rc, out, err = py(".claude/hooks/episodic.py", "actions", sid, env={**env, "EPISODIC_ROOT": str(root)})
+        found = sorted((root / "memory/episodes").glob(f"EP-*-{sid[:8]}.md"))
+        return rc, out + err, found[-1].read_text(encoding="utf-8") if found else ""
+
+    def block_of(text: str) -> str:
+        i, j = text.find(start), text.find(end)
+        return text[i:j + len(end)] if -1 < i < j else ""
+
+    def row(block: str, head_line: str) -> str:
+        return next((x for x in block.splitlines() if x.startswith(head_line)), "")
+
+    def view(root: Path, *args: str) -> tuple[int, str]:
+        rc, out, err = py("tools/context_graph.py", "--root", str(root), *args, env={"GIT_CEILING_DIRECTORIES": str(tmp)})
+        return rc, out + err
+
+    sid, key = "ac710000-0000-4000-8000-000000000041", token_samples()["github-token"]
+    epid = f"EP-{TODAY}-{sid[:8]}"
+    lines = [
+        says(0, tool("e1", "Edit", file_path=str(a / "src/app.py"), old_string="x", new_string="y")),
+        says(1, tool("w1", "Write", file_path=str(tmp / "graph-actions-outside.txt"), content="z")),
+        says(2, tool("w2", "Write", file_path=str(a / "src" / "we`ird.py"), content="z")),
+        transcript_line("user", at(3), toolUseResult={"stdout": "", "stderr": "", "bashEditDiff": {
+            "files": [{"filePath": str(a / "src/gen.py"), "hunks": []}], "moreFiles": 2}},
+            message={"role": "user", "content": [{"type": "tool_result", "tool_use_id": "s0", "content": "ok"}]}),
+        says(4, tool("r1", "Read", file_path=str(a / "intent.md"))),
+        says(5, tool("r2", "Read", file_path=str(tmp / "graph-actions-elsewhere.md"))),
+        says(6, tool("r3", "Grep", pattern="demo", path=str(a / "docs"))),
+        says(7, tool("c1", "Bash", command=f"git commit -qm 'CHECKPOINT: D-002' && echo {key}")),
+        answer(8, "c1", f"[main {made}] CHECKPOINT: D-002 — the session's commit\n 1 file changed\n"
+                        "GATES PASS: pass=9 fail=0 inconclusive=0 skip=0\n"),
+        says(9, tool("g1", "Bash", command="bash .claude/hooks/py.sh tools/gates/gate.py")),
+        answer(10, "g1", [{"type": "text", "text": "FAIL         graph            1 error\n"
+                                                   "GATES FAIL: pass=8 fail=1 inconclusive=0 skip=0\n"}]),
+        says(11, tool("l1", "Bash", command="cat docs/old-run.log")),
+        answer(12, "l1", f"GATES FAIL: PRINTED-BACK\nFAIL         memory           an old run\n[main {old}] CHECKPOINT: "
+                         "an old commit\n[main deadbee] CHECKPOINT: one no repository holds\n"),
+        says(13, tool("b1", "Bash", command="git commit -qm later > out.txt", run_in_background=True)),
+        says(14, tool("d1", "Bash", command="bash .claude/hooks/py.sh tools/gates/drill.py")),
+        answer(15, "d1", "ARMED=10  ELSEWHERE=0  DEAD/DEFECT=0  INCONCLUSIVE=0  (9s)\n"),
+        says(16, {"type": "text", "text": f"[main {talked}] CHECKPOINT: a commit only the model's own text names"}),
+        answer(17, "x1", "PreToolUse:Bash hook error: GUARD[B4]: ბრძანება საიდუმლოს კითხულობს", error=True),
+        transcript_line("attachment", at(18), attachment={"type": "hook_additional_context", "hookEvent": "PostToolUse",
+                                                          "content": ["SENTINEL[I1]: this content came from outside"]}),
+        says(20, tool("w3", "Write", file_path=str(a / "src" / f"{key}.txt"), content="z")),
+        says(21, tool("e2", "Edit", file_path=str(a / "src/never.py"), old_string="q", new_string="r")),
+        answer(22, "e2", "<tool_use_error>String to replace not found in file.</tool_use_error>", error=True),
+        says(23, tool("r5", "Read", file_path=str(a / "docs/refused.md"))),
+        answer(24, "r5", "File does not exist.", error=True),
+    ]
+    sub = [transcript_line("assistant", at(19), isSidechain=True, message={"id": "s1", "content": [
+        tool("r4", "Read", file_path=str(a / "plan.md"))]})]
+    tp, ep = session(a, sid, lines, sub)
+    rc, out, text = actions(a, sid)
+    block = block_of(text)
+    changed, reads, commits, gates = (row(block, h) for h in ("- შეცვლილი ფაილები", "- წაკითხული ფაილები", "- commit-ები",
+                                                               "- კარიბჭეები"))
+    expect(rc == 0 and "actions: 3 file(s) changed, 2 read (named), 1 commit(s)" in out and "`src/app.py` ×1" in changed
+           and "`src/gen.py` ×1" in changed and "`intent.md` ×1" in reads and "`plan.md` ×1" in reads
+           and f"`{made}`" in commits, "control: `episodic.py actions` writes the block from a stub transcript — the files "
+           "changed by a tool and by a shell command, the files read (one by a subagent) and the commit git's own output "
+           "named", (out + block)[-400:], kind="control")
+    hidden = "`src/[" + "REDACTED:github-token].txt` ×1"  # split: the guard refuses a whole marker in new text (S2)
+    expect(bool(block) and key not in text and hidden in changed and "echo" not in block and "PRINTED-BACK" not in block
+           and "the session's commit" not in block and "cat docs" not in block, "seeded: a key planted in a command and "
+           "in a file's name, the command's text and what the tools printed never reach the episode — paths and numbers "
+           "only, the key redacted", block[-400:])
+    expect(bool(changed) and "never.py" not in block and "refused.md" not in block, "seeded: an Edit and a Read whose call "
+           "failed → neither file is listed: the call changed and read nothing", (changed + " | " + reads)[-400:])
+    expect(bool(block) and "graph-actions-outside" not in text and "graph-actions-elsewhere" not in text
+           and "წაკითხვა 1 · შეცვლილი ფაილი 1" in block, "seeded: a file read and a file written outside the project → "
+           "only counted, never named", block[-400:])
+    expect("we`ird" not in block and "კიდევ 1, რომლის სახელი ჩასაწერად არ გამოდგება" in changed
+           and "კიდევ 2, რომელიც Claude Code-მა არ ჩამოთვალა" in changed, "seeded: a path holding a backtick (it cannot be "
+           "written as code) and the files Claude Code did not list → counted, never written", changed[-300:])
+    expect(bool(commits) and f"`{old}`" not in commits and "deadbee" not in commits
+           and "კიდევ 2 — სხვა საცავისაა ან ამ სესიამდე გაკეთდა" in commits, "seeded: commit lines an old log printed back "
+           "— one made years before the session, one no repository holds → not the session's commits, only counted",
+           commits[-300:])
+    expect(bool(commits) and talked not in block, "seeded: a commit line in the model's own text → never taken for git's "
+           "output", commits[-300:])
+    expect("git commit ×2, ფონზე 1" in commits, "seeded: a commit run in the background with its output sent to a file → "
+           "counted with the commit runs, so a list without it never reads as complete", commits[-300:])
+    expect("GATES PASS ×1 · GATES FAIL ×1 (არ გავიდა: graph FAIL ×1)" in gates and "memory" not in gates,
+           "seeded: gate results come from the commands that ran the gates or committed — a log printed back is not a "
+           "run", gates[-300:])
+    expect("დრილი ×1, ბოლოს: ARMED=10 ELSEWHERE=0 DEAD/DEFECT=0 INCONCLUSIVE=0" in gates and "ფონზე გაშვებული 1" in gates,
+           "seeded: the drill's last line, and a run in the background counted as one whose result is elsewhere",
+           gates[-300:])
+    expect("- guard: B4 ×1 · sentinel: I1 ×1" in block, "seeded: the guard's and the sentinel's codes are counted",
+           block[-300:])
+    rc, _, again = actions(a, sid)
+    expect(rc == 0 and again.count(start) == 1 and again.count(end) == 1 and block_of(again) == block, "control: a second "
+           "run rewrites the block in place — one block, the same text", again[-300:], kind="control")
+    rc, q = view(a, "query", epid)
+    expect(rc == 0 and re.search(r"→ src/app\.py[^\n]*\[edited\]", q) is not None
+           and re.search(r"→ intent[^\n]*\[read\]", q) is not None and re.search(rf"→ {made}[^\n]*\[made\]", q) is not None,
+           "bridges: query of the episode → the file its session changed, the files it read and the commit it made",
+           q[-400:])
+    rc, i = view(a, "impact", "src/app.py")
+    expect(rc == 0 and re.search(rf"← {epid}[^\n]*\[edited\]", i) is not None, "bridges: impact of a file → the session "
+           "that changed it", i[-300:])
+    rc, w = view(a, "why", made)
+    expect(rc == 0 and re.search(rf"← {epid}[^\n]*\[made\]", w) is not None, "bridges: why of a commit → the session that "
+           "made it", w[-300:])
+    rc, out = view(a, "check")
+    expect(rc == 0 and "errors=0" in out and f"სესიები: 1 ეპიზოდი მოქმედებებით, {TODAY}-დან" in out, "control: an "
+           "episode whose block names real files and a real commit → graph OK, and the coverage line counts the session",
+           out[-300:], kind="control")
+    m = fresh(tmp, "graph-actions-map", a)
+    rc, out = view(m, "build")
+    cmap = m / "memory/graph/CONTEXT-MAP.md"
+    kinds = next((x for x in (cmap.read_text(encoding="utf-8") if cmap.exists() else "").splitlines()
+                  if x.startswith("changed: ")), "")
+    expect(rc == 0 and "edited: 1 · " in kinds and "made: 1 · " in kinds and "read: 2 · " in kinds, "bridges: the context "
+           "map counts the session's links as bridges — one file changed, two read, one commit made: only to what the "
+           "graph holds", kinds[-300:] or out[-300:])
+    two = fresh(tmp, "graph-actions-two", a)
+    later = "ac71000a-0000-4000-8000-00000000004a"
+    _, ep2 = session(two, later, [says(0, tool("e1", "Edit", file_path=str(two / "src/app.py"), old_string="x",
+                                                new_string="y"))])
+    for p, began in ((two / ep.relative_to(a), "2026-01-01T09:00:00+04:00"), (ep2, "2026-01-02T09:00:00+04:00")):
+        edit(p, f"date: {TODAY}\n", f'date: {TODAY}\nstarted: "{began}"\n')
+    actions(two, later)
+    rc, i = view(two, "impact", "src/app.py")
+    order = re.findall(r"← (EP-[\w-]+)[^\n]*\[edited\]", i)
+    expect(rc == 0 and order == [f"EP-{TODAY}-{later[:8]}", epid], "bridges: impact of a file two sessions changed → the "
+           "newer session first, by when it started — not by its name", i[-300:])
+    g = fresh(tmp, "graph-actions-ghost", a)
+    edit(g / ep.relative_to(a), f"`{made}`", f"`{made}` · `abcdef0` · `main`")
+    rc, out = view(g, "check")
+    _, gq = view(g, "query", epid)
+    expect(rc == 1 and re.search(rf"ERROR\s+BRIDGE-COMMIT\s+memory/episodes/{epid}\.md:\d+\s+{epid} cites commit abcdef0",
+                                 out) is not None and "cites commit main" not in out
+           and re.search(r"→ main \(commit", gq) is None, "seeded: an actions block naming a "
+           "commit this repository does not hold, in an episode the next commit changes → exit 1 with BRIDGE-COMMIT at its "
+           "line (a span that is not a hash is no commit)", out[-300:])
+    git(g, "add", "-A")
+    git(g, "commit", "-q", "-m", "CHECKPOINT: records")
+    rc, out = view(g, "check")
+    expect(rc == 0 and re.search(rf"WARNING\s+BRIDGE-COMMIT\s+memory/episodes/{epid}\.md:\d+", out) is not None,
+           "seeded: the same block once committed → a warning and exit 0 (history is not rewritten for a check)",
+           out[-300:])
+    c = fresh(tmp, "graph-actions-cut", a)
+    write(c / ep.relative_to(a), (c / ep.relative_to(a)).read_text(encoding="utf-8").replace(end + "\n", ""))
+    closed_episode(c, "ac710002-0000-4000-8000-000000000042", tp)  # an episode with no block at all
+    rc, out = view(c, "check")
+    _, q = view(c, "query", epid)
+    expect(rc == 0 and "1 ეპიზოდის ბლოკი მოქმედებებს არ ასახელებს" in out and "1 ეპიზოდს ბლოკი არ აქვს" in out
+           and "[edited]" not in q, "seeded: a block cut before its end marker → counted as one that names nothing, its "
+           "lines never read as bridges; an episode with no block → counted", (out + q)[-400:])
+    rc, _, text = actions(c, sid)
+    expect(rc == 0 and text.count(start) == 1 and text.count(end) == 1, "seeded: a start marker left without its end → "
+           "`episodic.py actions` drops it and writes one whole block", text[-300:])
+    u = fresh(tmp, "graph-actions-unread", vault)
+    missing = "ac710003-0000-4000-8000-000000000043"
+    closed_episode(u, missing, tdir / "no-such-transcript.jsonl")
+    rc, out, text = actions(u, missing)
+    b = block_of(text)
+    expect(rc == 2 and "INCONCLUSIVE" in out and "- ⚠ ჩანაწერი ვერ წავიკითხე: სესიის ჩანაწერის ფაილი ვერ მოიძებნა" in b
+           and "- შეცვლილი ფაილები" not in b, "seeded: no transcript → exit 2, and a block that says it could not read one "
+           "— never an empty list", (out + b)[-300:])
+    odd = "ac710004-0000-4000-8000-000000000044"
+    session(u, odd, ['{"foo": 1}', '["x"]'])
+    rc, out, text = actions(u, odd)
+    expect(rc == 2 and "ვერცერთი ვერ ამოვიცანი" in block_of(text), "seeded: a transcript in a format the reader does not "
+           "know → exit 2, and the block says so", (out + text)[-300:])
+    rc, out, _ = actions(u, "ac710005-0000-4000-8000-000000000045")
+    expect(rc == 2 and "no episode for session" in out, "seeded: no episode for the session → exit 2, nothing written",
+           out[-200:])
+    many = "ac710006-0000-4000-8000-000000000046"
+    session(u, many, [says(0, *[tool(f"r{n}", "Read", file_path=str(u / f"docs/r{n:02}.md")) for n in range(45)])])
+    rc, out, text = actions(u, many)
+    reads = row(block_of(text), "- წაკითხული ფაილები")
+    expect(rc == 0 and "(45, ნაჩვენებია 40, კიდევ 5 — მხოლოდ რიცხვად)" in reads and reads.count("`docs/r") == 40,
+           "seeded: 45 files read → the block names 40 and counts the rest", reads[-200:])
+    lone = "ac710007-0000-4000-8000-000000000047"
+    session(u, lone, [says(0, tool("c1", "Bash", command="git commit -qm x")), answer(1, "c1", "[main 1a2b3c4] x\n")])
+    rc, out, text = actions(u, lone)
+    expect(rc == 0 and "ვერ შემოწმდა 1: პროექტის საქაღალდე git-ის საცავი არ არის" in row(block_of(text), "- commit-ები"),
+           "seeded: a project that is not a git repository → a commit line is counted as unchecked, never listed",
+           text[-300:])
+    rc, out = view(u, "check")
+    expect(rc == 0 and f"სესიები: 2 ეპიზოდი მოქმედებებით, {TODAY}-დან, 2 ეპიზოდის ბლოკი მოქმედებებს არ ასახელებს" in out,
+           "seeded: two blocks that say their transcript could not be read → the coverage line counts them apart from the "
+           "two that name their actions", out[-300:])
+    outer = tmp / "graph-actions-outer"
+    inner = fresh(outer, "project", vault)
+    git(outer, "init", "-q", "-b", "main")
+    git(outer, "add", "-A")
+    git(outer, "commit", "-q", "-m", "CHECKPOINT: the outer repository's commit")
+    nested = "ac710009-0000-4000-8000-000000000049"
+    session(inner, nested, [says(0, tool("c1", "Bash", command="git commit -qm x")),
+                            answer(1, "c1", f"[main {head(outer)}] CHECKPOINT: the outer repository's commit\n")])
+    rc, out, text = actions(inner, nested)
+    expect(rc == 0 and "ვერ შემოწმდა 1: პროექტის საქაღალდე git-ის საცავი არ არის" in row(block_of(text), "- commit-ები"),
+           "seeded: a project folder inside another repository → that repository's commit is counted as unchecked, never "
+           "listed as the project's", text[-300:])
+    e = fresh(tmp, "graph-actions-end", vault)
+    child = "ac710008-0000-4000-8000-000000000048"
+    tp_e, ep_e = session(e, child, [says(0, tool("e1", "Edit", file_path=str(e / "intent.md"), old_string="G", new_string="H"))])
+    payload = write(state / "payload-actions.json", json.dumps({"session_id": child, "transcript_path": str(tp_e),
+                                                                "episode": str(ep_e)}))
+    py(".claude/hooks/episodic.py", "summarize", str(payload), env={**env, "EPISODIC_ROOT": str(e)})
+    expect("`intent.md` ×1" in row(block_of(ep_e.read_text(encoding="utf-8")), "- შეცვლილი ფაილები"), "seeded: the "
+           "SessionEnd child (`summarize`) writes the block, before any model call", ep_e.read_text(encoding="utf-8")[-300:])
+    skill = (CODE / ".claude/skills/session-close/SKILL.md").read_text(encoding="utf-8")
+    expect("episodic.py actions ${CLAUDE_SESSION_ID}" in skill, "control: /session-close refreshes the block with "
+           "`episodic.py actions` (ADR-0018 §3 — one step, one instruction, L-018)", "the step is missing", kind="control")
+
+
+def g_graph_code(tmp: Path, vault: Path) -> None:
+    """ADR-0018 §4: the code layer. Every code file is a node — other languages' and the engine's own in .claude/hooks/
+    and .githooks/ included — linked to the project files it imports: Python read by `ast` (a lazy import inside a
+    function, a relative one from its package, an absolute one from the folders the file's own sys.path lines add, its
+    folder, its package's top and the root); JavaScript, TypeScript, HTML and CSS by a careful reader that knows the five
+    explicit forms — `import … from`, `require(…)`, `<script src>`, `<link href>`, `@import` — written in code, never in a
+    comment or a string. A dynamic import, an alias path and a path that names no file are counted, never followed; a
+    package is no project file; another session's research is not read. Ghost files wait on disk under every trap, so a
+    link that should not be there shows. A file nested deeper than Python holds is counted as unread, never a crash, and
+    a long line, thousands of export lines and a page of thousands of comments are each read in one pass."""
+    c = fresh(tmp, "graph-code", vault)
+    small = "export const x = 1;\n"
+    app_js = "\n".join([
+        '// built for SPEC-0001; import ghost from "./ghost.js"',
+        '/* require("./ghost.js") */',
+        'import { util } from "./util.js";',
+        'import "./side.js";',
+        'export * from "./reexp.js";',
+        'const lib = require("./lib.js");',
+        'const later = import("./dyn.js");',
+        "const named = require(name);",
+        'const computed = require("./ghost.js" + suffix);',
+        'import e from "./extless";',
+        'import "./widgets";',
+        'import config from "@/config";',
+        'import React from "react";',
+        'import missing from "./missing.js";',
+        'import { T } from "./types.js";',
+        'const label = `import x from "./ghost.js" SPEC-0009`;',
+        """const other = 'require("./ghost.js")';""",
+        'const re = /"/; import after from "./after.js";',
+        'const half = total / 2; import div from "./div.js";',
+        ""])
+    files = {
+        "app/main.py": ('"""The app entry."""\nimport importlib\nimport json\n\nimport helper\nfrom pkg import mod\n\n'
+                        '# import ghost_comment\nTEXT = "import ghost_string"\nplugin = importlib.import_module("plug" + "in")\n'
+                        '\n\ndef lazy():\n    import helper\n    from pkg import lazy_mod\n    return lazy_mod, mod, json, helper\n'),
+        "app/pkg/__init__.py": "",
+        "app/pkg/mod.py": "from .sub import thing\nfrom .helper import nothing\nfrom pkg.lazy_mod import y\n",
+        "app/pkg/near.py": "import sub\n",
+        "app/broken.py": "def broken(:\n    pass\n",
+        ".claude/stray.py": "x = 1\n",
+        ".claude/hooks/hook.py": ('"""A hook that reaches the engine tools (ADR-0001)."""\nimport sys\nfrom pathlib import Path\n\n'
+                                 'ROOT = Path(__file__).resolve().parents[2]\nsys.path.insert(0, str(ROOT / "tools"))\n'
+                                 "import lib  # noqa: E402\n"),
+        ".githooks/pre-commit": "#!/usr/bin/env bash\n# runs the gates (ADR-0001)\nexit 0\n",
+        "src/x.go": "package main\n\nfunc main() {}\n",
+        "site/package.json": '{"name": "site"}\n',
+        "site/index.html": ('<!doctype html>\n<link rel="stylesheet" href="css/site.css">\n'
+                            '<!-- <script src="js/ghost.js"></script> -->\n'
+                            '<script src="https://cdn.example.com/x.js"></script>\n'
+                            '<script type="module" src="/js/app.js"></script>\n'),
+        "site/js/app.js": app_js,
+        "site/css/site.css": '/* @import "ghost.css"; */\n@import "base.css";\n@import url(theme.css);\nbody { color: red; }\n',
+        "research/x/tool.js": 'import b from "./b.js";\n',
+        "research/x/b.js": small,
+        "research/x/old.py": "import tool\n",
+        "site/js/widgets/index.js": small,
+    }
+    for rel in ("app/helper.py", "app/ghost_comment.py", "app/ghost_string.py", "app/pkg/sub.py", "app/pkg/lazy_mod.py",
+                "tools/lib.py"):
+        files[rel] = "x = 1\n"
+    for name in ("util.js", "side.js", "reexp.js", "lib.js", "dyn.js", "types.ts", "ghost.js", "react.js", "after.js",
+                 "div.js", "extless.js"):
+        files[f"site/js/{name}"] = small
+    for name in ("base.css", "theme.css", "ghost.css"):
+        files[f"site/css/{name}"] = "body { margin: 0; }\n"
+    for rel, text in files.items():
+        write(c / rel, text)
+    git(c, "init", "-q", "-b", "main")
+    git(c, "add", "-A")
+    git(c, "commit", "-q", "-m", "CHECKPOINT: D-002 — the code layer")
+    short = run(["git", "-C", str(c), "rev-parse", "--short", "HEAD"])[1].strip()
+
+    def view(root: Path, *args: str) -> tuple[int, str]:
+        rc, out, err = py("tools/context_graph.py", "--root", str(root), *args, env={"GIT_CEILING_DIRECTORIES": str(tmp)})
+        return rc, out + err
+
+    def linked(out: str, arrow: str = "→") -> list[str]:
+        return sorted(re.findall(rf"^\s*{arrow} (\S+) \[imports\]$", out, re.M))
+
+    rc, out = view(c, "check")
+    expect(rc == 0 and "errors=0, warnings=0" in out and "კოდი: 32 ფაილი — იმპორტები: css 4, html 1, js 13, python 11"
+           in out and "კომენტარები: css 4, hash 1, html 1, js 13, python 11" in out, "control: Python, JavaScript, "
+           "TypeScript, HTML and CSS files, a Go file and the engine's hooks → graph OK, and the coverage line counts "
+           "the code files and the files each reader read — none of .claude/ itself", out[-500:], kind="control")
+    expect("იმპორტის წამკითხველი არ აქვს: .go 1, pre-commit 1" in out, "seeded: a Go file and a git hook without a "
+           "suffix → nodes the coverage line counts as files without an import reader", out[-400:])
+    expect("ვერ წაიკითხა 1 ფაილი" in out, "seeded: a Python file with a syntax error → counted as unread, never as a "
+           "file without imports", out[-400:])
+    expect("(დინამიკური 4, ფსევდონიმი 1)" in out and "; 2 იმპორტის გზას გრაფში ფაილი არ შეესაბამება" in out,
+           "seeded: importlib, import(…) and two computed requires, an alias path (@/…), and two relative paths that "
+           "name no file → counted, never followed; a web address and an unknown package are not counted", out[-400:])
+    rc, rq = view(c, "query", "research/x/tool.js")
+    expect("git-ის ისტორიის კიდევ 4 კოდის ფაილი ამ ფენის გარეთაა (.claude/ 1, research/ 3)" in out and "not found" in rq,
+           "seeded: another session's research and a script in .claude/ itself → not read, and the coverage line counts "
+           "the code git knows outside the layer, by folder", (out + rq)[-400:])
+    rc, q = view(c, "query", "app/main.py")
+    expect(rc == 0 and linked(q) == ["app/helper.py", "app/pkg/lazy_mod.py", "app/pkg/mod.py"], "code: a Python file "
+           "→ the modules it imports — from its own folder, a package's submodule, a lazy import inside a function — "
+           "never one an import in a comment or a string names, a package's __init__ behind its submodule, or json",
+           q[-400:])
+    rc, q = view(c, "query", "app/pkg/mod.py")
+    _, near = view(c, "query", "app/pkg/near.py")
+    expect(rc == 0 and linked(q) == ["app/pkg/lazy_mod.py", "app/pkg/sub.py"] and linked(q, "←") == ["app/main.py"]
+           and linked(near) == ["app/pkg/sub.py"], "code: a relative import from the package — never the module of that "
+           "name a folder up —, an absolute one from the package's top, a sibling from the file's own folder, and the "
+           "file that imports it", (q + near)[-400:])
+    rc, q = view(c, "query", ".claude/hooks/hook.py")
+    expect(rc == 0 and linked(q) == ["tools/lib.py"] and "→ ADR-0001-demo (adr, proposed) Demo decision [cites]" in q,
+           "code: an engine hook → the module its sys.path line (Path(__file__).resolve().parents[2] / \"tools\") "
+           "reaches, and the decision its docstring cites", q[-400:])
+    rc, q = view(c, "query", "site/js/app.js")
+    want = ["site/js/after.js", "site/js/div.js", "site/js/extless.js", "site/js/lib.js", "site/js/reexp.js",
+            "site/js/side.js", "site/js/types.ts", "site/js/util.js", "site/js/widgets/index.js"]
+    expect(rc == 0 and linked(q) == want, "code: JavaScript → `import … from`, a bare `import`, `export … from`, a "
+           "literal `require(…)`, the .ts behind a .js, a path without its extension, a folder's index, and an import "
+           "after a regular expression holding a quote and after a division", str(linked(q)) + " " + q[-300:])
+    expect(rc == 0 and not any(x in q for x in ("ghost", "dyn.js", "react", "missing", "config")), "seeded: an import "
+           "in a comment, a string and a template, an import(…), an alias and a package, each with a file waiting on "
+           "disk → no link", q[-400:])
+    expect("→ SPEC-0001-demo (spec, draft) Demo spec [cites]" in q, "code: a JavaScript comment citing a spec → a cites "
+           "link (a spec number in a string is no citation: the check above found no BRIDGE-ID)", q[-400:])
+    rc, q = view(c, "query", "site/index.html")
+    expect(rc == 0 and linked(q) == ["site/css/site.css", "site/js/app.js"], "code: HTML → `<link href>` from its "
+           "folder and `<script src=\"/…\">` from the product's folder — never a commented-out script or a web address",
+           q[-400:])
+    rc, q = view(c, "query", "site/css/site.css")
+    expect(rc == 0 and linked(q) == ["site/css/base.css", "site/css/theme.css"], "code: CSS → `@import \"…\"` and "
+           "`@import url(…)`, never one in a comment", q[-400:])
+    rc, q = view(c, "query", "src/x.go")
+    expect(rc == 0 and q.startswith("src/x.go  [src/x.go]") and "[changed]" in q, "code: a file in another language → "
+           "a node with no import links, and the commit that changed it", q[-300:])
+    rc, w = view(c, "why", ".claude/hooks/hook.py")
+    expect(rc == 0 and re.search(rf"← {short} \(commit, [\d-]+\) CHECKPOINT: D-002 — the code layer \[changed\]", w)
+           is not None, "code: why of an engine hook → the commit that changed it (the code layer's nodes are there "
+           "before the commits link)", w[-300:])
+    rc, i = view(c, "impact", "app/pkg/sub.py")
+    expect(rc == 0 and "\n  ← app/pkg/mod.py [imports]\n    ← app/main.py [imports]" in i, "code: impact of a module "
+           "→ the file that imports it and, a level further, the file that imports that one", i[-300:])
+    rc, i = view(c, "impact", "SPEC-0001")
+    expect(rc == 0 and "← site/js/app.js [cites]" in i and "site/index.html" not in i, "code: impact of a spec → the "
+           "code that cites it, not that code's importers (a level further is for a code file)", i[-300:])
+    m = fresh(tmp, "graph-code-map", c)
+    rc, out = view(m, "build")
+    cmap = m / "memory/graph/CONTEXT-MAP.md"
+    kinds = next((x for x in (cmap.read_text(encoding="utf-8") if cmap.exists() else "").splitlines()
+                  if x.startswith("changed: ")), "")
+    expect(rc == 0 and "imports: 20 · " in kinds, "code: the context map counts the imports as bridges — 20 links, each "
+           "to a file the graph holds, a module imported twice once", kinds[-300:] or out[-300:])
+    rc, out = gate(c, "--only", "graph", "--pre-commit")
+    expect(rc == 0 and re.search(r"PASS\s+graph", out) is not None, "control: at commit, the same tree → the graph gate "
+           "passes", out[-300:], kind="control")
+    s = fresh(tmp, "graph-code-staged", c)
+    write(s / "site/js/view.tsx", "// renders SPEC-0009\nexport const View = () => null;\n")
+    git(s, "add", "site/js/view.tsx")
+    rc, out = gate(s, "--only", "graph", "--pre-commit")
+    expect(rc == 1 and re.search(r"ERROR\s+BRIDGE-ID\s+site/js/view\.tsx:1\s+a comment names SPEC-0009", out)
+           is not None, "seeded: at commit, a staged .tsx whose comment cites a spec the project does not have → graph "
+           "FAIL with BRIDGE-ID (the commit's tree carries the file's text, not an empty file)", out[-300:])
+    d = fresh(tmp, "graph-code-deep", vault)
+    chain = ' / "a"'
+    write(d / "app/deep_path.py", "import sys\nfrom pathlib import Path\n\nROOT = Path(__file__)" + chain * 2000
+          + "\nsys.path.insert(0, str(ROOT))\n")
+    write(d / "app/deep_ast.py", "from pathlib import Path\n\nROOT = Path(__file__)" + chain * 20000 + "\n")
+    write(d / "app/deep_parser.py", "x = " + "2 ** " * 20000 + "2\n")
+    git(d, "init", "-q", "-b", "main")
+    git(d, "add", "-A")
+    git(d, "commit", "-q", "-m", "CHECKPOINT: D-002 — deep code")
+    rc, out = view(d, "check")
+    expect(rc == 0 and "კოდი: 3 ფაილი" in out and "ვერ წაიკითხა 3 ფაილი" in out, "seeded: Python nested deeper than "
+           "Python holds — a path 2,000 levels deep (deeper than the reader's own stack), one 20,000 deep (deeper than "
+           "`ast` builds) and a power chain that overflows the parser's stack → each counted as unread, and the graph is "
+           "still built", out[-400:])
+    probe = r'''
+import sys, time
+sys.path.insert(0, sys.argv[1])
+import graph_layers as gl
+known = gl.Known.of(["site/a.js", "site/b.js", "site/c.ts", "site/index.html"])
+word = "x" + "a" * 60000 + ';\nimport a from "./a.js";\n'
+# after the imports nothing closes a search for `from`: each line that starts one would read on to the file's end
+exports = ('import {\n  a,\n  b,\n} from "./a.js"\nexport { b } from "./b.js"\n'
+           + "".join(f"export const A{i} = {i}\n" for i in range(6000)))
+minified = 'export{b}from"./b.js";function a(){return 1}' + "export function f(){return 2}" * 6000
+html = "".join(f"<p>{i}</p><!-- note {i} -->\n" for i in range(50000)) + '<script src="a.js"></script>\n'
+for name, rel, text in (("word", "site/c.ts", word), ("exports", "site/c.ts", exports),
+                        ("minified", "site/c.ts", minified), ("html", "site/index.html", html)):
+    t = time.perf_counter()
+    r = gl.read_code(rel, text, known)
+    print(name, f"{time.perf_counter() - t:.3f}", *sorted(p for p, _ in r.imports))
+'''
+    rc, out, err = check([PY, "-c", probe, str(CODE / "tools")])
+    timed = {m.group(1): (float(m.group(2)), m.group(3)) for m in re.finditer(r"^(\w+) (\d+\.\d+) ?(.*)$", out, re.M)}
+    secs, found = timed.get("word", (None, ""))
+    expect(rc == 0 and secs is not None and secs < 3 and found == "site/a.js", "seeded: a JavaScript line of 60,000 "
+           "word characters → read in under 3 s (the word before each quote, searched from every position of the run, "
+           "took ~13 s) and the import after it found", f"{timed} {err[-300:]}")
+    secs, found = timed.get("exports", (None, ""))
+    expect(rc == 0 and secs is not None and secs < 3 and found == "site/a.js site/b.js", "seeded: TypeScript whose "
+           "imports — one of them written over several lines — are followed by 6,000 export lines without a semicolon "
+           "or a quote → read in under 3 s (each line's search for `from` ran to the file's end: ~6 s), the imports "
+           "found", f"{timed} {err[-300:]}")
+    secs, found = timed.get("minified", (None, ""))
+    expect(rc == 0 and secs is not None and secs < 3 and found == "site/b.js", "seeded: one minified line — an "
+           "`export{…}from` and then 6,000 `}export` statements → read in under 3 s (the search for `from` stops at the "
+           "next `}export` too), the export found", f"{timed} {err[-300:]}")
+    secs, found = timed.get("html", (None, ""))
+    expect(rc == 0 and secs is not None and secs < 3 and found == "site/a.js", "seeded: an HTML page of 50,000 "
+           "comments → read in under 3 s (each comment's line was counted from the page's start: ~11 s), its script "
+           "found", f"{timed} {err[-300:]}")
 
 
 def g_graph_lesson(tmp: Path, vault: Path) -> None:
@@ -1398,6 +2032,23 @@ def episode_env(root: Path, state: Path, stub_cmd: str, marker: Path) -> dict:
             "DRILL_STUB_DELAY": str(MODEL_DELAY_S), "EPISODIC_COMPACT_WAIT_S": "8"}
 
 
+def version_env(tmp: Path, answer: str, rc: int = 0) -> tuple[dict, Path]:
+    """A stand-in claude for the live-probe line: it answers every call with `answer` and exits `rc`, and writes
+    each call's arguments to a log -> (the environment that makes the hook use it, the log)."""
+    stub, calls = tmp / "claude_version_stub.py", tmp / "claude-version-calls.txt"
+    if not stub.exists():
+        write(stub, "import os, sys, pathlib\n"
+                    "pathlib.Path(os.environ['DRILL_VERSION_LOG']).open('a', encoding='utf-8')"
+                    ".write(' '.join(sys.argv[1:]) + '\\n')\n"
+                    "print(os.environ['DRILL_VERSION_OUT'])\n"
+                    "sys.exit(int(os.environ['DRILL_VERSION_RC']))\n")
+    return ({"EPISODIC_CLAUDE_BIN": f'"{PY.replace(chr(92), "/")}" "{stub.as_posix()}"', "DRILL_VERSION_LOG": str(calls),
+             "DRILL_VERSION_OUT": answer, "DRILL_VERSION_RC": str(rc)}, calls)
+
+
+PROBE_TOML = '[[probe]]\nid = "{id}"\nwhat = "a drill probe"\nclaude_code = "{v}"\ndate = "2026-01-01"\n\n'
+
+
 def compaction_block(body: str) -> str:
     """The lines Claude Code appends to a transcript after a compaction (shape measured 2026-10-07): the
     boundary, then the summary as a user message — only the <summary> body, the model's <analysis> dropped."""
@@ -1460,6 +2111,9 @@ def g_episodic(tmp: Path, vault: Path) -> None:
         "    pathlib.Path(os.environ['DRILL_STUB_ENV']).write_text(json.dumps({'key': 'OPENAI_API_KEY' in os.environ,"
         " 'claudecode': 'CLAUDECODE' in os.environ, 'plain': os.environ.get('DRILL_PLAIN_VAR'),"
         " 'nested': os.environ.get('EPISODIC_NESTED')}))\n"
+        "if os.environ.get('DRILL_STUB_ARGS'):\n"  # what the model was started with — its prompt (ADR-0017 §5)
+        "    pathlib.Path(os.environ['DRILL_STUB_ARGS']).write_text(json.dumps(sys.argv[1:], ensure_ascii=False),"
+        " encoding='utf-8')\n"
         "if os.environ.get('DRILL_STUB_WINDOW') and os.name == 'nt':\n"  # did the model's process get a window
         "    import ctypes\n"
         "    hwnd = ctypes.windll.kernel32.GetConsoleWindow()\n"
@@ -1707,6 +2361,104 @@ def g_episodic(tmp: Path, vault: Path) -> None:
     g_unopened_links(tmp, vault, stub_cmd, marker)
     g_busy_files(tmp, vault, stub_cmd, marker)
     g_backup_line(tmp, vault)
+    g_live_probes(tmp, vault)
+    g_reflect_due(tmp, vault, state, stub_cmd, marker)
+    g_memory_purpose(tmp, vault, stub_cmd, marker)
+
+
+def g_memory_purpose(tmp: Path, vault: Path, stub_cmd: str, marker: Path) -> None:
+    """ADR-0017 §5: the session summarizer is told what memory is for, and /session-close carries the same paragraph —
+    held here word for word (line breaks aside), as the stage texts are (L-018); /session-close also looks a claim up in
+    the project's records before writing it (§3)."""
+    purpose = ("რისთვისაა მეხსიერება: რომ შემდეგმა სესიამ ერთი და იგივე თავიდან აღარ გამოიკვლიოს. ამიტომ ჩაწერე წესი, "
+               "მისი საბუთი — ბრძანება, commit ან ციტატა, რომლითაც ვიცით, რომ ის მართალია — და ნაპოვნი ხაფანგი. ნუ "
+               "გადაწერ იმას, რასაც git, ფაილები ან ეკრანი ისედაც აჩვენებს.")
+
+    def flat(text: str) -> str:
+        return " ".join(text.split())
+
+    w = fresh(tmp, "memory-purpose", vault)
+    state = tmp / "memory-purpose-state"
+    state.mkdir()
+    args_file = tmp / "memory-purpose-args.json"
+    sid = "3e3a0501-0000-4000-8000-000000000501"
+    tp = make_transcript(tmp / "transcript-memory-purpose.jsonl", datetime.now().astimezone() - timedelta(minutes=30))
+    ep = closed_episode(w, sid, tp)
+    pfile = write(state / f"payload-{sid[:8]}.json", json.dumps({"session_id": sid, "transcript_path": str(tp),
+                                                                "episode": str(ep)}))
+    py(".claude/hooks/episodic.py", "summarize", str(pfile),
+       env={**episode_env(w, state, stub_cmd, marker), "DRILL_STUB_DELAY": "0", "DRILL_STUB_ARGS": str(args_file)})
+    try:
+        args = json.loads(args_file.read_text(encoding="utf-8"))
+        prompt = args[args.index("-p") + 1]
+    except (OSError, ValueError, IndexError):
+        prompt = ""
+    expect(flat(purpose) in flat(prompt), "control: the prompt the session summarizer gives the model (`claude -p`, as "
+           "the stand-in received it) says what memory is for, word for word (ADR-0017 §5)",
+           f"the prompt: {len(prompt)} characters, the paragraph not in it" if prompt
+           else "the stand-in model was not started with a -p prompt", kind="control")
+    skill = (CODE / ".claude/skills/session-close/SKILL.md").read_text(encoding="utf-8")
+    missing = [what for what, ok in (("the paragraph", flat(purpose) in flat(skill)),
+                                     ("tools/recall.py", "tools/recall.py" in skill)) if not ok]
+    expect(not missing, "control: /session-close carries the same paragraph word for word (L-018) and looks a claim up "
+           "with tools/recall.py before writing it down (ADR-0017 §3)", "missing: " + ", ".join(missing), kind="control")
+
+
+def g_reflect_due(tmp: Path, vault: Path, state: Path, stub_cmd: str, marker: Path) -> None:
+    """ADR-0017 §4: once five sessions have closed since the last /reflect, the start brief reminds to run it (the
+    memory's "dream"); `episodic.py reflected <session>` records a run in that session's episode, in UTC, by the
+    machine; and the /reflect skill names the dream's three commands."""
+    def closed_ep(w: Path, i: int, ended: str, extra: str = "") -> None:
+        write(w / f"memory/episodes/EP-2026-02-01-{i:08x}.md", FM.format(
+            body=f'id: EP-2026-02-01-{i:08x}\ntype: episode\ntitle: "r{i}"\nsession: {i:08x}-0000-4000-8000-000000000000\n'
+                 f'date: 2026-02-01\nstatus: closed\ncompacts: 0\nclosed_by: session-close\nclosed_at: "{ended}"\n'
+                 f"needs_reconcile: false\n{extra}") + f"# EP-2026-02-01-{i:08x}\n")
+
+    def facts(w: Path, sid: str) -> str:
+        rc, out, _ = py(".claude/hooks/episodic.py", "start", stdin=json.dumps({"session_id": sid, "source": "startup"}),
+                        env={**episode_env(w, state, stub_cmd, marker), "EPISODIC_AUTOSUMMARY": "0"})
+        ctx = json.loads(out).get("hookSpecificOutput", {}).get("additionalContext", "") if out.strip().startswith("{") else ""
+        return ctx.partition("\n\n### ახლა — ")[0] or out[-200:]
+
+    def reflected(w: Path, sid: str) -> tuple[int, str]:
+        rc, out, err = py(".claude/hooks/episodic.py", "reflected", sid, env=episode_env(w, state, stub_cmd, marker))
+        return rc, out + err
+
+    w = fresh(tmp, "episodic-reflect", vault)
+    closed_ep(w, 0, "2026-02-01T09:00:00Z", 'reflected_at: "2026-02-01T08:30:00Z"\n')  # the session that ran /reflect
+    for i in range(1, 5):
+        closed_ep(w, i, f"2026-02-0{i + 1}T09:00:00Z")
+    f = facts(w, "9a1e0201-0000-4000-8000-000000000201")
+    expect("🔁" not in f, "control: four sessions closed since the last /reflect (the session that ran it closed after "
+           "it, and is not one of them) → no reminder", f[-240:], kind="control")
+    closed_ep(w, 5, "2026-02-07T09:00:00Z")
+    f = facts(w, "9a1e0202-0000-4000-8000-000000000202")
+    expect("PROPOSALS.md`): 1 — 🔁 ბოლო `/reflect`-იდან 5 სესია დაიხურა: შესაფერის მომენტში გაუშვი" in f, "seeded: "
+           "the fifth session closed since the last /reflect → the brief's proposals line reminds to run it, counting "
+           "five", f[-300:])
+    sid = "9a1e0203-0000-4000-8000-000000000203"
+    facts(w, sid)  # this session's episode
+    rc, out = reflected(w, sid)
+    ep = (w / f"memory/episodes/EP-{TODAY}-{sid[:8]}.md").read_text(encoding="utf-8")
+    expect(rc == 0 and re.search(r'(?m)^reflected_at: "?\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ"?$', ep) is not None,
+           "seeded: `episodic.py reflected <session>` records the run in that session's episode — reflected_at, in "
+           "UTC, written by the machine", out[-200:])
+    f = facts(w, "9a1e0204-0000-4000-8000-000000000204")
+    expect("🔁" not in f, "seeded: after `reflected` the count starts again → no reminder", f[-240:])
+    rc, out = reflected(w, "0bad0000-0000-4000-8000-000000000000")
+    expect(rc == 2 and "INCONCLUSIVE" in out and not list((w / "memory/episodes").glob("EP-*-0bad0000.md")),
+           "seeded: `reflected` for a session with no episode → INCONCLUSIVE (exit 2), and nothing is written", out[-200:])
+    n = fresh(tmp, "episodic-reflect-never", vault)
+    for i in range(5):
+        closed_ep(n, i, f"2026-02-0{i + 1}T09:00:00Z")
+    f = facts(n, "9a1e0205-0000-4000-8000-000000000205")
+    expect("🔁 `/reflect` არ ჩაწერილა, დაიხურა 5 სესია" in f, "seeded: no /reflect recorded and five sessions closed → "
+           "the brief reminds", f[-300:])
+    skill = (CODE / ".claude/skills/reflect/SKILL.md").read_text(encoding="utf-8")
+    missing = [s for s in ("gate.py --only memory", "tools/recall.py", ".claude/hooks/episodic.py reflected "
+                           "${CLAUDE_SESSION_ID}") if s not in skill]
+    expect(not missing, "control: the /reflect skill names the dream's three commands — the memory gate, recall, and "
+           "`episodic.py reflected` with this session's id (ADR-0017 §4)", ", ".join(missing), kind="control")
 
 
 def g_brief_caps(tmp: Path, vault: Path, state: Path, stub_cmd: str, marker: Path) -> None:
@@ -1728,9 +2480,9 @@ def g_brief_caps(tmp: Path, vault: Path, state: Path, stub_cmd: str, marker: Pat
             text += "\n" + line
         return text + "." * (n - len(text))
 
-    def brief(w: Path, sid: str) -> str:
+    def brief(w: Path, sid: str, extra: dict | None = None) -> str:
         rc, out, _ = py(".claude/hooks/episodic.py", "start", stdin=json.dumps({"session_id": sid, "source": "startup"}),
-                        env={**episode_env(w, state, stub_cmd, marker), "EPISODIC_AUTOSUMMARY": "0"})
+                        env={**episode_env(w, state, stub_cmd, marker), "EPISODIC_AUTOSUMMARY": "0", **(extra or {})})
         return json.loads(out).get("hookSpecificOutput", {}).get("additionalContext", "") if out.strip().startswith("{") else ""
 
     def shown(ctx: str, name: str) -> str:
@@ -1747,7 +2499,9 @@ def g_brief_caps(tmp: Path, vault: Path, state: Path, stub_cmd: str, marker: Pat
         write(w / f"memory/episodes/EP-2026-01-01-{i:08x}.md", FM.format(
             body=f'id: EP-2026-01-01-{i:08x}\ntype: episode\ntitle: "r{i}{title}"\n'
                  f'session: {i:08x}-0000-4000-8000-000000000000\n'
-                 'date: 2026-01-01\nstatus: closed\ncompacts: 0\nclosed_by: auto\nneeds_reconcile: true\n')
+                 'date: 2026-01-01\nstatus: closed\ncompacts: 0\nclosed_by: auto\nneeds_reconcile: true\n'
+                 # the /reflect reminder at its longest: it names the session that last ran /reflect
+                 + ('reflected_at: "2026-01-01T09:00:00+04:00"\n' if i == 0 else ""))
             + f"# EP-2026-01-01-{i:08x}\n\n## დახურვა — {ended} (reason: `other`)\n"
             + ("- ძრავა: 🔧 ძრავა შეიცვალა — " + "ძრავის ხელსაწყო drill_case.py, " * 40 + "\n" if i == 29 else ""))
     # and the longest backup line: more commits than its threshold beside the copy, both names at their cap
@@ -1755,21 +2509,26 @@ def g_brief_caps(tmp: Path, vault: Path, state: Path, stub_cmd: str, marker: Pat
     long_branch = "b" * (limits[1] + 20) if limits else ""
     if limits:
         backup_repo(w, limits[0] + 1, long_branch)
+    # and the longest live-probe line: more stale versions than it names, each at its longest
+    write(w / "tools/live_probes.toml", "".join(PROBE_TOML.format(id=f"P-{i}", v=f"1111.1111.111{i}") for i in range(5)))
+    venv, _ = version_env(tmp, "2222.2222.2222 (Claude Code)")
     sid = "9a1e0170-0000-4000-8000-000000000170"
     write(state / f"compacts-{sid}", "12")
-    ctx = brief(w, sid)
+    ctx = brief(w, sid, venv)
     facts = ctx.partition("\n\n### ახლა — ")[0]
     longest = limits is None or (f"💾 ბექაფი: {limits[0] + 1} commit" in facts
                                  and all(f"`{name[:limits[1] - 1]}…`" in facts for name in (long_branch,
                                                                                             "origin/" + long_branch)))
+    probe_line = "🧪 5 ცოცხალი ზონდი" in facts and " …), ახლა კი 2222.2222.2222 მუშაობს" in facts
+    reflect_line = "🔁 ბოლო `/reflect`-იდან 29 სესია დაიხურა" in facts
     expect("12 compact ამ სესიაში" in facts and "და კიდევ 20" in facts and "ბოლო დახურული სესიის ბოლოს" in facts
-           and longest and "მოჭრილია" not in ctx and len(ctx) <= 8_800
+           and longest and probe_line and reflect_line and "მოჭრილია" not in ctx and len(ctx) <= 8_800
            and all(shown(ctx, n) == sized(t, caps[n]) for n, (_, t) in blocks.items()),
            "control: three blocks at their caps beside the longest facts — the backup line's longest among them "
-           "— go whole, with 200 characters to spare for the catch-up fact this fixture does not start "
-           "(ADR-0017)",
-           f"{len(ctx):,} characters, facts {len(facts):,}; cut: {'მოჭრილია' in ctx}; backup line: {longest}",
-           kind="control")
+           "with the live-probe line and the /reflect reminder — go whole, with 200 "
+           "characters to spare for the catch-up fact this fixture does not start (ADR-0017)",
+           f"{len(ctx):,} characters, facts {len(facts):,}; cut: {'მოჭრილია' in ctx}; backup line: {longest}; "
+           f"probe line: {probe_line}; reflect line: {reflect_line}", kind="control")
     for i, (name, (block, tag)) in enumerate(blocks.items()):
         w = fresh(tmp, f"episodic-cap-{block}", vault)
         set_block(w / name, block, sized(tag, caps[name] + 600))
@@ -1924,6 +2683,57 @@ def g_backup_line(tmp: Path, vault: Path) -> None:
            and "დისტანციური ასლი (remote) არ აქვს" in out and "1 commit მხოლოდ ამ კომპიუტერზეა" in out,
            "seeded: a project with no remote at all (as firstrun.py leaves a new one) → 'no uploaded copy is seen', "
            "with the reason", f"rc={rc} {(out + err)[-300:]}")
+
+
+def g_live_probes(tmp: Path, vault: Path) -> None:
+    """A live probe — a check no drill can make, run by hand against the real Claude Code (L-009) — holds for
+    the version it ran on, and tools/live_probes.toml names that version for each probe. The start brief compares them
+    with `claude --version`: a difference is one fact with its own mark 🧪, the same version is silence, and a file it
+    cannot read or a claude that names no version is a fact too — never the silence of 'the same version' (rules/23). A
+    project made from the kit keeps no such file: no fact, and claude is never asked."""
+    env = {"EPISODIC_STATE_DIR": str(tmp / "probes-state"), "EPISODIC_AUTOSUMMARY": "0", "EPISODIC_NESTED": None}
+
+    def facts(root: Path, n: int, answer: str, rc: int = 0) -> tuple[str, str]:
+        """The start brief's facts while claude answers `--version` with `answer`, and what claude was asked."""
+        venv, calls = version_env(tmp, answer, rc)
+        calls.unlink(missing_ok=True)
+        out = py(".claude/hooks/episodic.py", "start", env={**env, **venv, "EPISODIC_ROOT": str(root)},
+                 stdin=json.dumps({"session_id": f"9a1e0145-0000-4000-8000-00000000000{n}", "source": "startup"}))[1]
+        try:
+            ctx = str(json.loads(out)["hookSpecificOutput"]["additionalContext"])
+        except (ValueError, KeyError, TypeError):
+            ctx = out
+        return ctx.partition("\n\n### ახლა — ")[0], calls.read_text(encoding="utf-8") if calls.exists() else ""
+
+    w = fresh(tmp, "live-probes", vault)
+    probes = w / "tools/live_probes.toml"
+    write(probes, PROBE_TOML.format(id="P-1", v="9.8.7") + PROBE_TOML.format(id="P-2", v="9.8.7"))
+    said, asked = facts(w, 1, "9.8.7 (Claude Code)")
+    expect("🧪" not in said and asked.split() == ["--version"], "control: every probe ran on the Claude Code that runs "
+           "now → no fact, and the version was asked (`claude --version`), not assumed", f"asked {asked!r} · {said[-300:]}",
+           kind="control")
+    write(probes, PROBE_TOML.format(id="P-1", v="9.8.6") + PROBE_TOML.format(id="P-2", v="9.8.7"))
+    said, asked = facts(w, 2, "9.8.7 (Claude Code)")
+    expect("- 🧪 1 ცოცხალი ზონდი Claude Code-ის სხვა ვერსიაზე ჩატარდა (9.8.6), ახლა კი 9.8.7 მუშაობს" in said
+           and "`tools/live_probes.toml`" in said, "seeded: one probe ran on another version → the fact, its mark 🧪, "
+           "the count, both versions and the file", said[-400:])
+    write(probes, '[[probe]]\nid = "P-1"\nclaude_code = \n')
+    said, asked = facts(w, 3, "9.8.7 (Claude Code)")
+    expect("- 🧪 ცოცხალი ზონდების ფაილი `tools/live_probes.toml` ვერ წავიკითხე (TOMLDecodeError" in said,
+           "seeded: a file TOML cannot parse → a fact that names it and why, not silence", said[-400:])
+    write(probes, PROBE_TOML.format(id="P-1", v="latest"))
+    said, asked = facts(w, 4, "9.8.7 (Claude Code)")
+    expect("- 🧪 ცოცხალი ზონდების ფაილი `tools/live_probes.toml` ვერ წავიკითხე (ValueError" in said,
+           "seeded: a probe whose claude_code is no version ('latest') → the same fact, never words compared as versions",
+           said[-400:])
+    write(probes, PROBE_TOML.format(id="P-1", v="9.8.7"))
+    said, asked = facts(w, 5, "no version here", rc=1)
+    expect("- 🧪 ცოცხალი ზონდების ვერსია ვერ შემოწმდა — `claude --version`: exit 1" in said and "--version" in asked,
+           "seeded: claude names no version (exit 1) → 'could not be checked', never the silence of the same version",
+           f"asked {asked!r} · {said[-400:]}")
+    said, asked = facts(fresh(tmp, "live-probes-none", vault), 6, "9.8.7 (Claude Code)")
+    expect("🧪" not in said and asked == "", "control: no probes file (a project made from the kit) → no fact, and "
+           "claude is never asked", f"asked {asked!r} · {said[-300:]}", kind="control")
 
 
 def g_unopened_links(tmp: Path, vault: Path, stub_cmd: str, marker: Path) -> None:
@@ -2969,10 +3779,45 @@ def g_gates(tmp: Path, vault: Path) -> None:
     g_engine_scan(tmp, v, token)
     g_instructions_gate(tmp, v)
     g_tasks_gate(tmp, v)
+    g_memory_gate(tmp, v)
     g_cmd_gates(tmp, v)
     g_staged_reads(tmp, v)
     g_left_out(tmp, v)
     g_drill_limit(tmp, v)
+    g_only_names(tmp, v)
+
+
+def g_only_names(tmp: Path, v: Path) -> None:
+    """`--only` with a name that names nothing. Until 2026-11-10 gate.py dropped an id no gate has without a
+    word: `--only json,no-such-gate` ran json, printed GATES PASS and exited 0 — a mistyped id looked like a gate that
+    passed. The drill's own `--only` and DRILL_GROUPS had the same hole for a group name. A name that checked nothing
+    is INCONCLUSIVE, by name (rules: no evidence is not a pass). The drill's control runs one real group in a child
+    drill — findings, about 4 s here; the two seeded runs stop before anything is drilled."""
+    c = fresh(tmp, "gates-only", v)
+    rc, out = gate(c, "--only", "json, toml")
+    expect(rc == 0 and re.search(r"PASS\s+json", out) is not None and re.search(r"PASS\s+toml", out) is not None
+           and "ONLY-UNKNOWN" not in out, "control: `--only` with two ids a gate has (a space after the comma) → both "
+           "run, PASS, no unknown-id line", out[-240:], kind="control")
+    rc, out = gate(c, "--only", "json,no-such-gate")
+    expect(rc == 2 and re.search(r"INCONCLUSIVE\s+no-such-gate\s+ONLY-UNKNOWN", out) is not None
+           and re.search(r"PASS\s+json", out) is not None, "seeded: `--only json,no-such-gate` → json still runs and the "
+           "unknown id is INCONCLUSIVE by name, exit 2 — never a quiet PASS", out[-300:])
+    (c / "bad.json").write_bytes(b'{"a": }\n')
+    rc, out = gate(c, "--only", "json,no-such-gate")
+    expect(rc == 1 and re.search(r"FAIL\s+json", out) is not None and "ONLY-UNKNOWN" in out, "seeded: a failing gate "
+           "next to an unknown id → FAIL, exit 1, and the unknown id is still named", out[-300:])
+    me = str(CODE / "tools/gates/drill.py")
+    rc, out, _ = check([PY, me, "--only", "findings"], timeout=300)
+    last = (out.strip().splitlines() or [""])[-1]
+    expect(rc == 0 and last.startswith("ARMED=") and "DRILL-UNKNOWN-GROUP" not in out, "control: the drill asked for one "
+           "group it has (findings) → it runs, exit 0, no unknown-group line", out[-200:], kind="control")
+    rc, out, _ = check([PY, me, "--only", "findings,no-such-group"], timeout=300)
+    expect(rc == 2 and "DRILL-UNKNOWN-GROUP: no-such-group" in out and "ARMED=" not in out, "seeded: the drill asked "
+           "for a group it does not have next to one it has → DRILL-UNKNOWN-GROUP by name, exit 2, nothing drilled",
+           out[-200:])
+    rc, out, _ = check([PY, me], env={"DRILL_GROUPS": "findings,no-such-group"}, timeout=300)
+    expect(rc == 2 and "DRILL-UNKNOWN-GROUP: no-such-group" in out and "ARMED=" not in out, "seeded: the same through "
+           "DRILL_GROUPS (the list a run without --only drills) → DRILL-UNKNOWN-GROUP by name, exit 2", out[-200:])
 
 
 def g_staged_reads(tmp: Path, v: Path) -> None:
@@ -2982,7 +3827,7 @@ def g_staged_reads(tmp: Path, v: Path) -> None:
     git(w, "add", "-A")
     git(w, "commit", "-q", "-m", "D-003 fixture")
     sha = run(["git", "-C", str(w), "rev-parse", "--short", "HEAD"])[1].strip()
-    readers = "graph,json,toml,python,shell,eol,instructions,tasks,budget"
+    readers = "graph,json,toml,python,shell,eol,instructions,tasks,budget,memory"
 
     def at_commit(root: Path, gids: str, env: dict | None = None) -> tuple[int, str]:
         return gate(root, "--only", gids, "--pre-commit", env=env)
@@ -3102,7 +3947,7 @@ def g_left_out(tmp: Path, v: Path) -> None:
            "out on its last line", last[-200:])
     stub = tmp / "left-out-gates"
     for rel in ("tools/gates/gate.py", "tools/gates/gates.toml", "tools/context_graph.py", "tools/redact.py", "tools/budget.py",
-                "tools/drill_floor.py", "tools/engine_line.py"):
+                "tools/drill_floor.py", "tools/engine_line.py", "tools/graph_layers.py"):
         write(stub / rel, (CODE / rel).read_text(encoding="utf-8"))
     floor_set(stub / "tools/gates/gates.toml", 1)  # the stand-in drill below holds one case
     write(stub / "tools/gates/drill.py", 'print("ARMED=1  DEAD/DEFECT=0  INCONCLUSIVE=0  (0s)  '
@@ -3278,6 +4123,109 @@ def g_tasks_gate(tmp: Path, v: Path) -> None:
     (e / "tasks/todo.md").unlink()
     rc, out = gate(e, "--only", "tasks")
     expect(rc == 2 and "INCONCLUSIVE" in out, "seeded: no task file at all → INCONCLUSIVE, never PASS", out[-200:])
+
+
+MEMORY_LESSON = ("# Lessons\n\n- **L-001 A drill lesson.** Stage a commit message from the scratchpad, never from `.git/`. "
+                 "Guarded by: drill (`gates`). [[L-001]]\n")
+# gate.py with another file in place of episodic.py: the start brief's limits cannot be read
+WITH_EPISODIC = ("import sys, pathlib; sys.path.insert(0, sys.argv[1]); import gate; gate.EPISODIC = pathlib.Path(sys.argv[2]); "
+                 "sys.exit(gate.main(['--only', 'memory']))")
+
+
+def g_memory_gate(tmp: Path, v: Path) -> None:
+    """`memory` (ADR-0017 §2): the top layer every session trusts — the lessons index and the auto blocks the start brief
+    shows — is checked claim by claim (a commit, a path, a D-/P-/L- number, a drill group), and a block the brief would
+    cut fails instead of being cut in silence."""
+    w = fresh(tmp, "gates-memory-ok", v)
+    write(w / "memory/LESSONS.md", MEMORY_LESSON)
+    write(w / ".gitignore", "memory/graph/\n")
+    write(w / "memory/graph/CONTEXT-MAP.md", "# generated, never committed\n")
+    git(w, "add", "-A")
+    git(w, "commit", "-q", "-m", "memory fixture")
+    sha = run(["git", "-C", str(w), "rev-parse", "--short", "HEAD"])[1].strip()
+    full = run(["git", "-C", str(w), "rev-parse", "HEAD"])[1].strip()
+    claims = (f"- ბოლოს: {sha}, მერე {sha}-ში; `tasks/todo.md`, `memory/graph/CONTEXT-MAP.md`, `docs/specs/SPEC-0001-demo`; "
+              "D-002, P-001, L-001; ნაკრების `kit:deadbeef1`; drill (`gates`)\n")
+    edit(w / "progress.md", "- ფაზა: DRILL-STATE-ქართული\n", "- ფაზა: DRILL-STATE-ქართული\n" + claims)
+    git(w, "add", "-A")
+    rc, out = gate(w, "--only", "memory")
+    expect(rc == 0 and re.search(r"PASS\s+memory", out) is not None and "1 commit(s)" in out and "4 path(s)" in out,
+           "control: a commit that exists (bare and with a Georgian ending), paths that exist (a note named without .md, "
+           "a generated file, git's own folder), registered numbers and a real drill group → memory PASS; another "
+           "repository's commit (`kit:<sha>`) is not read as this one's", out[-300:], kind="control")
+    rc, out = gate(w, "--only", "memory", "--pre-commit")
+    expect(rc == 0 and re.search(r"PASS\s+memory", out) is not None and "[input: staged files (git index)]" in out,
+           "control: at commit a file git ignores (memory/graph/) and git's own folder are looked for on disk — a commit "
+           "never holds them → memory PASS", out[-300:], kind="control")
+    seeds = [
+        ("a made-up commit in ახლა", "progress.md", f"- ბოლოს: {sha}, მერე", "- ბოლოს: deadbeef1, მერე",
+         "commit deadbeef1 does not exist"),
+        ("a made-up commit with a Georgian ending (`deadbee5-ში`)", "progress.md", f"მერე {sha}-ში", "მერე deadbee5-ში",
+         "commit deadbee5 does not exist"),
+        ("a drill group that does not exist, in a lesson", "memory/LESSONS.md", "drill (`gates`)", "drill (`gatez`)",
+         "drill group `gatez` does not exist"),
+        ("a file that does not exist", "progress.md", "`tasks/todo.md`", "`tasks/todo-old.md`",
+         "`tasks/todo-old.md` does not exist"),
+        ("a path in another case (Windows and macOS would find it, Linux would not)", "progress.md", "`tasks/todo.md`",
+         "`Tasks/todo.md`", "`Tasks/todo.md` does not exist"),
+        ("a file in a folder the project does not have", "tasks/todo.md", "verify: look\n",
+         "verify: look `tools/no_such_tool.py`\n", "`tools/no_such_tool.py` does not exist"),
+        ("a D- number no task line holds", "plan.md", "- [ ] თესტი\n", "- [ ] თესტი (D-999)\n", "D-999 is in no register"),
+        ("a P- number no proposal holds", "progress.md", "P-001,", "P-777,", "P-777 is in no register"),
+        ("an L- number no lesson holds", "progress.md", "L-001;", "L-555;", "L-555 is in no register"),
+        ("ახლა longer than its cap", "progress.md", "- ფაზა: DRILL-STATE-ქართული\n",
+         "- ფაზა: DRILL-STATE-ქართული\n- " + "ა" * 1900 + "\n", "its cap is 1,800"),
+        ("a block with more lines than the brief shows", "tasks/todo.md", "verify: look\n",
+         "verify: look\n" + "".join(f"- {i}\n" for i in range(61)), "lines — the start brief shows 60"),
+        ("a block whose markers are gone", "plan.md", "<!-- auto: current-phase:start -->\n", "", "no `current-phase` block"),
+    ]
+    for i, (label, name, old, new, marker) in enumerate(seeds):
+        s = fresh(tmp, f"gates-memory-seed{i}", w)
+        edit(s / name, old, new)
+        rc, out = gate(s, "--only", "memory")
+        expect(rc == 1 and re.search(r"FAIL\s+memory", out) is not None and marker in out, f"seeded: {label} → memory FAIL",
+               out[-300:])
+    s = fresh(tmp, "gates-memory-staged", w)
+    edit(s / "progress.md", f"- ბოლოს: {sha}, მერე", "- ბოლოს: deadbeef1, მერე")
+    git(s, "add", "progress.md")
+    edit(s / "progress.md", "- ბოლოს: deadbeef1, მერე", f"- ბოლოს: {sha}, მერე")
+    rc, out = gate(s, "--only", "memory", "--pre-commit")
+    expect(rc == 1 and "commit deadbeef1 does not exist" in out, "seeded: at commit, a made-up commit staged and fixed on "
+           "disk only → memory FAIL (the commit records the staged text)", out[-240:])
+    s = fresh(tmp, "gates-memory-staged-good", w)
+    edit(s / "progress.md", f"- ბოლოს: {sha}, მერე", "- ბოლოს: deadbeef1, მერე")
+    rc, out = gate(s, "--only", "memory", "--pre-commit")
+    expect(rc == 0 and re.search(r"PASS\s+memory", out) is not None, "control: at commit, the claim good when staged and "
+           "broken on disk only → memory PASS (the commit records the good text)", out[-240:], kind="control")
+    s = fresh(tmp, "gates-memory-shallow", w)
+    write(s / ".git/shallow", full + "\n")  # what a CI checkout of one commit leaves
+    edit(s / "progress.md", f"- ბოლოს: {sha}, მერე", "- ბოლოს: deadbeef1, მერე")
+    rc, out = gate(s, "--only", "memory")
+    expect(rc == 2 and re.search(r"INCONCLUSIVE\s+memory", out) is not None and "shallow clone" in out, "seeded: a commit "
+           "a shallow clone does not hold (CI checks out one commit) → INCONCLUSIVE — it may be older than the clone's "
+           "history — never 'does not exist'", out[-240:])
+    d = tmp / "gates-memory-nogit"
+    shutil.copytree(w, d, ignore=shutil.ignore_patterns(".git"))
+    edit(d / "memory/LESSONS.md", "never from `.git/`", "never from git's own folder")
+    rc, out = gate(d, "--only", "memory", env={"GIT_CEILING_DIRECTORIES": str(tmp)})
+    expect(rc == 2 and re.search(r"INCONCLUSIVE\s+memory", out) is not None and f"commit {sha} could not be checked" in out,
+           "seeded: no git repository to look a named commit up in → INCONCLUSIVE, never PASS", out[-240:])
+    s = fresh(tmp, "gates-memory-groups", w)
+    write(s / "tools/gates/drill.py", "GROUPS = sorted({'gates'})\n")
+    rc, out = gate(s, "--only", "memory")
+    expect(rc == 2 and re.search(r"INCONCLUSIVE\s+memory", out) is not None
+           and "no GROUPS list in tools/gates/drill.py" in out, "seeded: the project's drill.py holds no GROUPS list it can "
+           "read → a named drill group is INCONCLUSIVE, never PASS", out[-240:])
+    rc, out, err = check([PY, "-c", WITH_EPISODIC, str(CODE / "tools/gates"), str(tmp / "no-episodic.py")],
+                         env={"GATE_ROOT": str(w)})
+    expect(rc == 2 and "the start brief's limits could not be read" in out + err, "seeded: the start brief's limits "
+           "(episodic.py) cannot be read → INCONCLUSIVE, no block measured", (out + err)[-240:])
+    e = fresh(tmp, "gates-memory-none", v)
+    for name in ("progress.md", "plan.md", "tasks/todo.md"):
+        (e / name).unlink()
+    rc, out = gate(e, "--only", "memory")
+    expect(rc == 2 and re.search(r"INCONCLUSIVE\s+memory", out) is not None and "was not found" in out, "seeded: no lessons "
+           "index and none of the block files → INCONCLUSIVE, never PASS", out[-240:])
 
 
 def g_instructions_gate(tmp: Path, v: Path) -> None:
@@ -5180,6 +6128,125 @@ def g_observe(tmp: Path) -> None:
     g_observe_cache(tmp, tdir, env)
 
 
+# tools/recall.py with one of its readers swapped for one that breaks halfway: the search must say INCONCLUSIVE.
+RECALL_BOOM = ("import sys; sys.path.insert(0, sys.argv[1]); import recall\n"
+               "def boom(*a, **k):\n    raise RuntimeError('drill: a reader that breaks halfway')\n"
+               "recall.search_episodes = boom\nsys.exit(recall.main(sys.argv[2:]))")
+
+
+def g_recall(tmp: Path) -> None:
+    """tools/recall.py (ADR-0017 §3): finds a phrase in this project's own records and names who said it, redacts a
+    key, takes hidden characters out, fences what it prints as data, never reads another project's records, and says
+    INCONCLUSIVE (exit 2), never "not found", when it had nothing to read or broke."""
+    print("== recall (tools/recall.py: a text search of this project's own records) ==")
+    proj, tdir = tmp / "recall-project", tmp / "recall-transcripts"
+    (proj / "memory/episodes").mkdir(parents=True)
+    tdir.mkdir()
+    env = {"OBSERVE_ROOT": str(proj), "OBSERVE_TRANSCRIPTS": str(tdir)}
+    rc, out, _ = py("tools/recall.py", "anything", env=env)
+    expect(rc == 2 and "RECALL INCONCLUSIVE" in out, "seeded: no transcript and no episode → INCONCLUSIVE (exit 2), "
+           "never 'not found'", out[:200])
+    sid, ts, key = "4eca1100-0000-4000-8000-000000000011", "2026-11-09T08:00:00.000Z", token_samples()["github-token"]
+    hidden = chr(0x200B) + chr(0x202E)  # a zero-width space and a right-to-left override: invisible, read by a model
+    lines = [
+        transcript_line("user", ts, message={"role": "user", "content": "the owner said PLANTED-PHRASE\nქართული today"}),
+        transcript_line("assistant", ts, message={"id": "a1", "content": [
+            {"type": "text", "text": f"KEY-NEARBY-MARK {key} is in the record"}]}),
+        transcript_line("assistant", ts, message={"id": "a2", "content": [
+            {"type": "text", "text": chr(0xDF) * 200 + " FOLD-MARK after two hundred letters that casefold to two " + "y" * 500}]}),
+        transcript_line("user", ts, message={"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": f"the tool printed HIDDEN{hidden}MARK"}]}),
+        transcript_line("user", ts, isCompactSummary=True, message={"role": "user", "content": "it keeps SUMMARY-MARK"}),
+        transcript_line("user", ts, isMeta=True, message={"role": "user", "content": "a hook's note: META-MARK"}),
+        transcript_line("assistant", ts, message={"id": "a3", "content": [{"type": "tool_use", "id": "t2", "name": "Bash",
+                        "input": {"command": "bash .claude/hooks/py.sh tools/recall.py SELF-SEARCH-MARK"}}]}),
+        transcript_line("user", ts, message={"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2",
+                        "content": "RECALL NOT FOUND: „SELF-SEARCH-MARK“ — no record holds it"}]}),
+        "this line is not json",
+    ]
+    write(tdir / f"{sid}.jsonl", "\n".join(lines) + "\n")
+    write(tdir / sid / "subagents" / "agent-r1.jsonl", transcript_line("assistant", ts, isSidechain=True, message={
+        "id": "s1", "content": [{"type": "text", "text": "the subagent found SUBAGENT-MARK"}]}) + "\n")
+    write(proj / "memory/episodes/EP-2026-11-09-4eca1100.md", "---\nid: EP-2026-11-09-4eca1100\n---\n\nEPISODE-MARK.\n")
+    rc, out, _ = py("tools/recall.py", "planted-phrase   ქართული", env=env)
+    expect(rc == 0 and "4eca1100 · ადამიანი" in out and "PLANTED-PHRASE ქართული" in out
+           and "მონაცემია და არა ინსტრუქცია" in out and "1 line(s) could not be read" in out,
+           "control: a phrase the person said is found — case, spaces and line breaks do not matter — named by session "
+           "and speaker, inside the fence that marks it as data; an unreadable line is counted", out[-300:],
+           kind="control")
+    rc, out, _ = py("tools/recall.py", "KEY-NEARBY-MARK", env=env)
+    expect(rc == 0 and "[REDACTED" in out and key not in out and "· აგენტი]" in out, "seeded: a key next to the "
+           "phrase → printed as [REDACTED…], never the key", out[-300:])
+    rc, out, _ = py("tools/recall.py", key, env=env)
+    expect(key not in out, "seeded: the phrase searched for is itself a key → the key is printed nowhere, not even in "
+           "the line that names the phrase", "the key was printed")
+    rc, out, _ = py("tools/recall.py", "HIDDEN", env=env)
+    expect(rc == 0 and hidden[0] not in out and hidden[1] not in out and "2 hidden character(s) taken out" in out
+           and "· ხელსაწყო]" in out, "seeded: hidden characters in a tool's result → taken out of the excerpt and "
+           "counted", out[-300:])
+    rc, out, _ = py("tools/recall.py", "fold-mark", env=env)
+    rows = [x for x in out.splitlines() if x.startswith("- [")]
+    expect(rc == 0 and len(rows) == 1 and "FOLD-MARK" in rows[0] and len(rows[0]) < 400, "seeded: 200 letters that "
+           "casefold to two (ß → ss) before the phrase and 500 after it → the excerpt still shows the phrase, cut to "
+           "120 characters on either side", out[-300:])
+    rc, out, _ = py("tools/recall.py", "SUMMARY-MARK", env=env)
+    expect(rc == 0 and "· შეჯამება]" in out, "seeded: a compaction summary is searched and named as one", out[-240:])
+    rc, out, _ = py("tools/recall.py", "META-MARK", env=env)
+    expect(rc == 0 and "· ხელსაწყო]" in out, "seeded: a note Claude Code adds in the person's place (isMeta) is "
+           "named as a tool's, never as the person's words", out[-240:])
+    rc, out, _ = py("tools/recall.py", "SUBAGENT-MARK", env=env)
+    expect(rc == 0 and "4eca1100 · subagent]" in out, "seeded: a subagent's own transcript is searched and named",
+           out[-240:])
+    rc, out, _ = py("tools/recall.py", "EPISODE-MARK", env=env)
+    expect(rc == 0 and "EP-2026-11-09-4eca1100.md · ეპიზოდი" in out, "seeded: an episode is searched and named",
+           out[-240:])
+    rc, out, _ = py("tools/recall.py", "SELF-SEARCH-MARK", env=env)
+    expect(rc == 1 and "RECALL NOT FOUND" in out, "seeded: an earlier search's own command and answer are not "
+           "records of the work → not found", out[-240:])
+    rc, out, _ = py("tools/recall.py", "never-said-anywhere", env=env)
+    expect(rc == 1 and "does not prove it did not happen" in out, "control: a phrase no record holds → exit 1, saying "
+           "this does not prove it did not happen", out[-240:], kind="control")
+    rc, out, _ = py("tools/recall.py", "mark", "--limit", "2", env=env)
+    expect(rc == 0 and out.count("\n- [") == 2 and "(+5 more" in out, "seeded: more hits than --limit → only that "
+           "many shown, the rest counted", out[-300:])
+    rc, out, _ = py("tools/recall.py", "SUBAGENT-MARK", "--session", "4eca", env=env)
+    expect(rc == 0 and "· subagent]" in out, "control: --session with the start of the session's id → that session "
+           "and its subagents are searched", out[-240:], kind="control")
+    rc, out, _ = py("tools/recall.py", "SUBAGENT-MARK", "--session", "ffff", env=env)
+    expect(rc == 2 and "0 transcript file(s)" in out, "seeded: --session names a session that left no record → "
+           "INCONCLUSIVE, and no other session's records are searched", out[-240:])
+    lonely, broken = tmp / "recall-lonely", tmp / "recall-broken"  # a project with no episodes, and its transcripts
+    lonely.mkdir()
+    write(broken / f"{sid}.jsonl", transcript_line("user", ts, message={"role": "user", "content": "NEXT-TO-A-BROKEN-FILE"})
+          + "\n")
+    (broken / "unreadable.jsonl").mkdir()  # named like a transcript, cannot be read as a file
+    lone = {"OBSERVE_ROOT": str(lonely), "OBSERVE_TRANSCRIPTS": str(broken)}
+    rc, out, _ = py("tools/recall.py", "next-to-a-broken-file", env=lone)
+    expect(rc == 0 and "1 file(s) could not be read" in out, "seeded: a file that cannot be read next to one that can "
+           "→ the readable one is searched, the other counted", out[-240:])
+    write(broken / f"{sid}.jsonl", "not json\n{also not json\n")
+    rc, out, _ = py("tools/recall.py", "next-to-a-broken-file", env=lone)
+    expect(rc == 2 and "nothing in them could be read" in out, "seeded: not one line of any record can be read → "
+           "INCONCLUSIVE (exit 2), never 'not found'", out[-240:])
+    rc, out, err = check([PY, "-c", RECALL_BOOM, str(CODE / "tools"), "anything"], env=env)
+    expect(rc == 2 and "the search itself broke" in out, "seeded: the search breaks halfway → INCONCLUSIVE (exit 2), "
+           "never exit 1, which reads as 'not found'", (out + err)[-240:])
+    # With no folder given, recall reads the folder Claude Code names after the project's path — this project's only
+    home, mine, theirs = tmp / "recall-home", tmp / "recall-mine", tmp / "recall-theirs"
+    for p, mark in ((mine, "MY-PROJECT-MARK"), (theirs, "THEIR-PROJECT-MARK")):
+        p.mkdir()
+        slug = re.sub(r"[^A-Za-z0-9]", "-", str(p.resolve()))
+        write(home / ".claude/projects" / slug / f"{sid}.jsonl", transcript_line("user", ts, message={
+            "role": "user", "content": f"said here: {mark}"}) + "\n")
+    homes = {"OBSERVE_ROOT": str(mine), "OBSERVE_TRANSCRIPTS": None, "HOME": str(home), "USERPROFILE": str(home)}
+    rc, out, _ = py("tools/recall.py", "MY-PROJECT-MARK", env=homes)
+    expect(rc == 0 and "said here: MY-PROJECT-MARK" in out, "control: with no folder given, this project's own "
+           "transcript folder (named after its path) is found and searched", out[-240:], kind="control")
+    rc, out, _ = py("tools/recall.py", "THEIR-PROJECT-MARK", env=homes)
+    expect(rc == 1 and "said here" not in out, "seeded: a phrase only another project's transcripts hold → not found: "
+           "another project's records are never read", out[-240:])
+
+
 def usage_of(cw: int = 0, cr: int = 0, out: int = 0, ttl: str = "1h") -> dict:
     """A model call's usage: cw tokens written to the cache (1-hour or 5-minute entries), cr read from it."""
     return {"input_tokens": 0, "output_tokens": out, "cache_read_input_tokens": cr, "cache_creation_input_tokens": cw,
@@ -5341,6 +6408,29 @@ def lost_secret_rules(deny: list[str]) -> list[str]:
     return [rule for rule in SECRET_READ_DENY if rule not in deny]
 
 
+# The ask list — the windows a person decides in — and the shell deny rules are written as `Bash(...)`, and a
+# `Bash(...)` rule does not cover the PowerShell tool Claude Code has on Windows. With that tool on, `git stash list`
+# was refused through Bash — the ask rule `Bash(git stash*)` — and ran through PowerShell with no window (live, Claude
+# Code 2.1.321, 2026-11-10). The tool is not on by default here: with Git Bash installed, Claude Code switches it off
+# by itself as soon as a settings file holds a Bash deny rule (the engine's list holds twelve) — and
+# CLAUDE_CODE_USE_POWERSHELL_TOOL=1, a PowerShell rule in any settings file or `--allowedTools PowerShell` brings it
+# back; the audit's probes passed that flag, which is how they met the tool. So the tool is switched off by its name:
+# with "PowerShell" on the deny list it is not offered with the switch set, with the flag, or with both
+# (probed live). The guard reads a PowerShell command too (its `ps` mode); what had no twin was the
+# ask list. Monitor, the third tool that starts a command, needs no line here: a `Bash(...)` rule and a PreToolUse hook
+# whose matcher names Bash both reach it — probed live the same day (the ask rule stopped `git stash list` through
+# Monitor and the clone without that rule ran it; the guard refused a secret-file read through it, GUARD[B4]). Not
+# probed, from Claude Code's hooks page: a PostToolUse hook with that matcher does not run for Monitor, so the sentinel
+# does not see what a Monitor command prints.
+OTHER_SHELLS = ("PowerShell",)
+
+
+def open_shells(deny: list[str]) -> list[str]:
+    """Shell tools other than Bash that the deny list does not switch off by name. A rule for one command —
+    `PowerShell(git stash*)` — is not the name: every other command of that shell stays outside the ask list."""
+    return [tool for tool in OTHER_SHELLS if tool not in deny]
+
+
 # ADR-0015: a permission window only where a person can decide. The engine's own files change without one — the drill
 # at commit watches them — while the permissions file itself, the money switches, installs, sending, deletions and paid
 # runs still ask. One file of each engine folder stands for the folder.
@@ -5436,6 +6526,16 @@ def g_wiring(tmp: Path, vault: Path) -> None:
         rest = [rule for rule in perms.get("deny", []) if rule != gone]
         expect(lost_secret_rules(rest) == [gone], f"seeded: a deny list without {gone} is caught by name",
                str(lost_secret_rules(rest)))
+    open_now = open_shells(perms.get("deny", []))
+    expect(not open_now, "the ask list is written for Bash: the other shell Claude Code offers (PowerShell) is switched "
+           "off by name on the deny list — no command reaches it past the windows",
+           "not denied by name: " + ", ".join(open_now))
+    closed = [rule for rule in perms.get("deny", []) if rule not in OTHER_SHELLS]
+    expect(open_shells(closed) == list(OTHER_SHELLS), "seeded: a deny list without the PowerShell line is caught by name",
+           str(open_shells(closed)))
+    scoped = closed + ["PowerShell(git stash*)"]
+    expect(open_shells(scoped) == list(OTHER_SHELLS), "seeded: a rule for one PowerShell command in place of the tool's "
+           "name leaves that shell open → caught", str(open_shells(scoped)))
     expect("mcp__*" in perms.get("ask", []) and perms.get("disableBypassPermissionsMode") == "disable",
            "every MCP tool asks the owner first, and bypass-permissions mode is switched off", str(perms.get("ask", [])[-3:]))
     # rewriting the last commit asks the owner, like reset and rebase — the allowed `git commit *` let it through
@@ -5672,6 +6772,23 @@ def g_launcher(tmp: Path, bash: str) -> None:
         ctx = ""
     expect(rc == 0 and ctx.startswith("PY-MISSING") and "systemMessage" in out,
            "seeded: no Python at session start → a notice for the person and the agent (valid JSON, exit 0)", (out + err)[-160:])
+    # What the notice says must be what happens. The guard's hook carries `onFailure: "block"`, so with no
+    # Python Claude Code stops every edit and shell call (probed live — tools/live_probes.toml). Until 2026-11-10 the
+    # launcher's three texts said the hooks were "OFF": an agent told that reads it as "go on without them", and the
+    # probe's model passed exactly that on to the person.
+    try:
+        person = json.loads(out)["systemMessage"]
+    except (ValueError, KeyError, TypeError):
+        person = ""
+    expect("will be stopped" in ctx and "OFF" not in ctx and "ვერც ბრძანებას გაუშვებს" in person
+           and "გამორთულია" not in person,
+           "seeded: the session-start notice says the calls are stopped until Python is installed — to the agent and to "
+           "the person — and not that the hooks are off", (ctx + " | " + person)[-220:])
+    rc, out, err = launch(fake, ".claude/hooks/guard.py", stdin="{}")
+    expect(rc == 1 and "PY-MISSING" in err and "stops every edit and shell call" in err and "OFF" not in err
+           and not out.strip(),
+           "seeded: the guard hook with no Python → exit 1 and one line that says every edit and shell call is stopped "
+           "(the reason Claude Code shows with the blocked call)", (out + err)[-220:])
 
 
 def g_firstrun(tmp: Path) -> None:
@@ -6136,7 +7253,13 @@ def main() -> int:
         print(f"SELF-TEST DEAD: stubbed checkers were not detected (rc={rc}, DEAD={dead}) — the drill is a rubber stamp.")
         print(out[-600:])
         return 1
-    want = set((a.only or os.environ.get("DRILL_GROUPS") or ",".join(GROUPS)).split(","))
+    asked = a.only or os.environ.get("DRILL_GROUPS") or ",".join(GROUPS)
+    want = {name.strip() for name in asked.split(",") if name.strip()}  # read as gate.py reads its own --only
+    unknown = sorted(want.difference(GROUPS))
+    if unknown:  # a name that is no group drilled nothing, and a run of the groups named next to it looked whole
+        print(f"DRILL-UNKNOWN-GROUP: {', '.join(unknown)} — no such group, so nothing was drilled "
+              f"(groups: {', '.join(GROUPS)})")
+        return 2
     left_out = []  # groups this copy cannot drill: named again in the last line, which is what gate.py shows
     tmp = Path(tempfile.mkdtemp(prefix="engine-drill-"))
     t0 = time.time()
@@ -6154,6 +7277,7 @@ def main() -> int:
             g_sentinel(tmp, vault)
         if "observe" in want:
             g_observe(tmp)
+            g_recall(tmp)
         if "episodic" in want:
             g_episodic(tmp, vault)
         if "stop" in want:

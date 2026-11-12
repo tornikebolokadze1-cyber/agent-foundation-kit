@@ -11,9 +11,18 @@ the agent, and checks it mechanically.
   bash .claude/hooks/py.sh tools/context_graph.py check [FILE ...]     integrity check; with FILEs, report only
                                                                        issues that involve those files
   bash .claude/hooks/py.sh tools/context_graph.py query ID [--depth N] one node's neighbourhood (ID or file stem)
+  bash .claude/hooks/py.sh tools/context_graph.py why ID [--depth N]   why it is so: file → commit → task → spec → goal
+  bash .claude/hooks/py.sh tools/context_graph.py impact ID [--depth N] what relies on it: links, tasks, comments, commits
   bash .claude/hooks/py.sh tools/context_graph.py pending              documents waiting for the owner's /approve
   bash .claude/hooks/py.sh tools/context_graph.py stage                where the project stands (F1–F6) and what comes next
   bash .claude/hooks/py.sh tools/context_graph.py brief                SessionStart hook: rebuild + stage + short brief
+
+Every command but `pending` and `stage` also reads the bridges between the layers (ADR-0018 §2, tools/graph_layers.py):
+the commits git holds, the task lines, the plans' tasks, the specs' requirements and the ids code comments cite — the
+sessions (§3): each episode's actions block names the files its session changed and read and the commits it made — and
+the code (§4): every code file, the engine's hooks included, with the project files it imports. A bridge whose target is
+gone fails `check` in a file the commit being made changes and warns in an older one; every answer ends with a coverage
+line — what was read and what was not.
 
 Exit codes (check): 0 = no errors, 1 = errors found, 2 = inconclusive (nothing
 was scanned, or the root is wrong) — a check that saw nothing must not pass.
@@ -56,6 +65,8 @@ SKIP_NAMES = {"node_modules", ".venv", "venv", "__pycache__", "dist", "build"}
 # package's README) follows the product's rules, not the vault's, so it is foreign — a node, never checked.
 CODE_MARKERS = ("package.json", "pyproject.toml")
 LINKABLE_SUFFIXES = {".md", ".html", ".json", ".jsonl", ".py", ".toml", ".txt", ".csv", ".png", ".jpg", ".svg", ".pdf"}
+# The engine's own code sits in dot-folders the vault walk skips; the code layer reads it there too (ADR-0018 §4)
+CODE_DOT_DIRS = (".claude/hooks", ".githooks")
 
 # ── Document types ───────────────────────────────────────────────────────────
 # A file in one of these locations MUST declare this type in its frontmatter.
@@ -117,6 +128,18 @@ KINDS = ("website", "game", "agent", "automation", "other")
 # Relation fields: which type each one must point to (None = any).
 RELATION_TYPES = {"intent": "intent", "spec": "spec", "supersedes": None, "superseded_by": None,
                   "adrs": "adr", "depends_on": None, "related": None, "source": None}
+# Bridges between the layers (ADR-0018 §2, tools/graph_layers.py): the link kinds add_layers() writes —
+#   changed: commit → file it changed · task: commit → the task its first line names · receipt: task → its ✓ commit or file
+#   names: task line → ADR / SPEC / PLAN (T<n>) / P-NNN · req, ac: plan's T<n> → spec's REQ- / AC- · goal: REQ- → G<n>
+#   cites: code comment → ADR / SPEC / PLAN / D-NNN · in: a task line or an id inside a file → that file
+#   edited, read, made: an episode's session → a file it changed / read, a commit it made (its actions block, §3)
+#   imports: a code file → a project file it imports (the code layer, §4)
+BRIDGE_KINDS = {"changed", "task", "receipt", "names", "req", "ac", "goal", "cites", "in", "edited", "read", "made",
+                "imports"}
+# A bridge whose target is not there, and the check's code for it: an error in a file the commit being made changes, a
+# warning in an older one (a squash may legally remove a commit); BRIDGE-GIT — git could not tell — is always a warning.
+BRIDGE_PROBLEMS = {"no-commit": "BRIDGE-COMMIT", "no-file": "BRIDGE-FILE", "no-id": "BRIDGE-ID", "unchecked": "BRIDGE-GIT"}
+PROPOSALS_PATH = "memory/PROPOSALS.md"
 
 LEDGER_PATH = "memory/approvals.md"
 
@@ -140,22 +163,27 @@ def printable(text: str) -> str:
 class Link:
     target: str          # raw target text
     line: int            # 1-based line in the file
-    kind: str            # "link" or a frontmatter relation name
+    kind: str            # "link", a frontmatter relation name, or a bridge (BRIDGE_KINDS, ADR-0018)
     resolved: str | None = None   # node key (vault-relative posix path) or None
-    problem: str | None = None    # "broken" | "ambiguous" | "outside" (leaves the project, review M2)
+    problem: str | None = None    # "broken" | "ambiguous" | "outside" (leaves the project, review M2) | BRIDGE_PROBLEMS
+    src: str = ""        # the file the link is written in, when its node is not a file (a task line, a plan's task)
 
 
 @dataclass
 class Node:
-    path: str                     # vault-relative posix path — the node key
-    fm: dict | None = None
+    path: str                     # vault-relative posix path — the node key; a bridge node's key (ADR-0018 §2):
+    fm: dict | None = None        # "commit:<sha>", "task:D-NNN", or "<file>#<id>" for an id inside a file
     fm_error: str | None = None
     body_line: int = 1
     links: list[Link] = field(default_factory=list)
     foreign: bool = False
+    layer: str = "file"           # "file", or a bridge node: "commit", "task", "anchor"
+    origin: str = ""              # where a bridge node is written: "tasks/todo.md:70", "git"
 
     @property
     def stem(self) -> str:
+        if self.layer != "file":
+            return self.id
         return Path(self.path).stem if self.path.endswith(".md") else Path(self.path).name
 
     @property
@@ -202,6 +230,10 @@ class Graph:
     nodes: dict[str, Node]
     by_stem: dict[str, list[str]]
     ledger: dict[str, list[str]]  # id -> the statuses the owner ledger records for that document as it is now
+    layers: bool = False          # the bridges were read (add_layers, ADR-0018)
+    changed: set[str] | None = None  # files the commit being made changes; None = git could not tell
+    coverage: dict = field(default_factory=dict)  # what the bridge readers read and what they could not
+    code_dirs: tuple[str, ...] = ()  # the product's code folders (code_folders): foreign for links, read for code
 
     def edges(self) -> list[tuple[str, str, str]]:
         out = []
@@ -211,16 +243,23 @@ class Graph:
                     out.append((n.path, ln.resolved, ln.kind))
         return out
 
+    def knowledge_edges(self) -> list[tuple[str, str, str]]:
+        """The links the knowledge files themselves write — what an index, an orphan or the context map counts."""
+        return [(a, b, k) for a, b, k in self.edges() if k not in BRIDGE_KINDS and self.nodes[a].layer == "file"]
+
     def find(self, ident: str) -> Node | None:
-        """Look a node up by vault path, file stem, or frontmatter id (case-insensitive)."""
+        """Look a node up by vault path, file stem, or id (case-insensitive) — a bridge node by its id too: D-141, a
+        commit's hash or the start of it, `PLAN-0001 T1`, `G1`."""
         ident = ident.strip().removesuffix(".md")
-        for key in (ident, ident + ".md"):
+        for key in (ident, ident + ".md", "task:" + ident.upper()):
             if key in self.nodes:
                 return self.nodes[key]
         lo = ident.lower()
         for n in self.nodes.values():
             if n.stem.lower() == lo or n.id.lower() == lo:
                 return n
+        if re.fullmatch(r"[0-9a-f]{7,40}", lo):
+            return next((n for n in self.nodes.values() if n.layer == "commit" and str((n.fm or {}).get("sha", "")).startswith(lo)), None)
         return None
 
 
@@ -422,6 +461,32 @@ def iter_vault_files(root: Path):
                 yield f"{rel_dir}/{fn}".lstrip("/")
 
 
+def _in_dot_code(rel_dir: str) -> bool:
+    return any(rel_dir == d or rel_dir.startswith(d + "/") for d in CODE_DOT_DIRS)
+
+
+def iter_code_files(root: Path, is_code):
+    """Every code file of the project (`is_code`: graph_layers.is_code) — those of the vault's folders and the engine's own
+    in CODE_DOT_DIRS —, never another session's research or a dependency or build folder."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = Path(dirpath).relative_to(root).as_posix()
+        rel_dir = "" if rel_dir == "." else rel_dir
+        kept = []
+        for d in dirnames:
+            sub = f"{rel_dir}/{d}".lstrip("/")
+            if (sub + "/").startswith(FOREIGN_PREFIXES) or d in SKIP_NAMES:
+                continue
+            if _in_dot_code(sub) or any(c.startswith(sub + "/") for c in CODE_DOT_DIRS) or not _is_skipped_dir(sub):
+                kept.append(d)
+        dirnames[:] = kept
+        if _is_skipped_dir(rel_dir) and not _in_dot_code(rel_dir):
+            continue  # a folder on the way to one of CODE_DOT_DIRS (.claude): nothing of its own is read
+        for fn in filenames:
+            rel = f"{rel_dir}/{fn}".lstrip("/")
+            if not fn.startswith(".") and is_code(rel):
+                yield rel
+
+
 def _extract_body_links(text: str, body_line: int) -> list[Link]:
     lines = text.split("\n")
     out: list[Link] = []
@@ -542,10 +607,19 @@ def _frontmatter_links(fm: dict, text: str) -> list[Link]:
     return out
 
 
-def load(root: Path | None = None) -> Graph:
-    root = (root or default_root()).resolve()
+def load(root: Path | None = None, layers: bool = False, repo: Path | None = None, at_commit: bool = False) -> Graph:
+    """The knowledge graph of the files under root; layers=True adds the bridges (add_layers — git history, task lines,
+    the ids code comments cite). `repo`, `at_commit`: see add_layers."""
+    g = _load_files((root or default_root()).resolve())
+    if layers:
+        add_layers(g, repo, at_commit)
+    return g
+
+
+def _load_files(root: Path) -> Graph:
     nodes: dict[str, Node] = {}
-    foreign = FOREIGN_PREFIXES + code_folders(root)
+    products = code_folders(root)
+    foreign = FOREIGN_PREFIXES + products
     for rel in iter_vault_files(root):
         node = Node(path=rel, foreign=rel.startswith(foreign))
         if rel.endswith(".md"):
@@ -568,7 +642,7 @@ def load(root: Path | None = None) -> Graph:
         by_stem.setdefault(n.stem.lower(), []).append(key)
     rows = _read_ledger(root)
     ledger = {n.id: _ledger_statuses(rows[n.id], n) for n in nodes.values() if n.fm and not n.foreign and n.id in rows}
-    g = Graph(root=root, nodes=nodes, by_stem=by_stem, ledger=ledger)
+    g = Graph(root=root, nodes=nodes, by_stem=by_stem, ledger=ledger, code_dirs=products)
     for n in nodes.values():
         for ln in n.links:
             _resolve(g, n, ln)
@@ -664,6 +738,258 @@ def _ledger_statuses(rows: list[tuple[str, str, str]], n: Node) -> list[str]:
     return [to for to, day, path in rows if path == n.path and not (updated and day and day < updated)]
 
 
+# ── Bridges between the layers (ADR-0018 §2) ─────────────────────────────────────────────────────────────────
+def add_layers(g: Graph, repo: Path | None = None, at_commit: bool = False) -> None:
+    """Add the bridges to the knowledge graph: every code file with the files it imports (the code layer, §4), commits,
+    tasks, proposals, the intent's goals, the specs' requirements and criteria, the plans' tasks, the ids code comments
+    cite and the sessions' actions (§3) — each a node or a link that keeps its source line. `repo`:
+    the repository whose history and changes count (at commit the checked tree is a copy of the index, without git);
+    `at_commit`: the commit being made is what the index holds."""
+    import graph_layers as gl  # here, not at the top: the guard imports this module on every tool call
+    repo = (repo or g.root).resolve()
+    g.layers = True
+    seen = _add_code(g, gl)  # first: the commits and the sessions link to the code files it adds
+    shas, history_code = _add_commits(g, gl, repo)
+    # what the commit being made changes; when git could not read the history, nothing is known, and every broken bridge
+    # counts as one in a changed file
+    g.changed = gl.changed_paths(repo, at_commit) if shas is not None else None
+    _add_tasks(g, gl)
+    _add_entries(g, gl)
+    _add_actions(g, gl)
+    missed: dict[str, int] = {}  # code git knows that is outside the code layer — said, never left out in silence
+    for f in history_code - seen:
+        if (g.root / f).is_file():
+            where = f.split("/", 1)[0] + "/" if "/" in f else f
+            missed[where] = missed.get(where, 0) + 1
+    g.coverage.update(code_missed=sum(missed.values()), code_missed_kinds=dict(sorted(missed.items())))
+    docs = {n.id: n.path for n in g.nodes.values() if n.layer == "file" and not n.foreign and n.type in ("adr", "spec", "plan")}
+    top = {p.name for p in g.root.iterdir()}
+    for n in list(g.nodes.values()):
+        for ln in n.links:
+            if ln.kind == "receipt":
+                _resolve_receipt(g, gl, repo, at_commit, shas, top, ln)
+            elif ln.kind == "made":
+                key, problem = _commit_key(g, gl, repo, shas, ln.target)
+                ln.resolved, ln.problem = key, problem
+            elif ln.kind in ("task", "names", "cites", "req", "ac", "goal") and not ln.resolved and not ln.problem:
+                ln.resolved = _bridge_target(g, n, ln, docs)
+                # a commit's message is history: a task or plan it names may be gone without anything being wrong
+                ln.problem = None if ln.resolved or ln.kind == "task" else "no-id"
+
+
+def _bridge_node(g: Graph, key: str, layer: str, fm: dict, origin: str) -> Node:
+    if key not in g.nodes:
+        g.nodes[key] = Node(path=key, fm=fm, layer=layer, origin=origin)
+    return g.nodes[key]
+
+
+def _add_commits(g: Graph, gl, repo: Path) -> tuple[dict[str, str] | None, set[str]]:
+    """A node for each commit HEAD reaches, linked to the files it changed and the tasks its first line names. Returns
+    full hash → node key for the receipts (None when git could not read the history) and the code files the history
+    names."""
+    commits, why = gl.read_commits(repo)
+    if commits is None:
+        g.coverage["commits"] = why
+        return None, set()
+    shas: dict[str, str] = {}
+    files: set[str] = set()
+    code = named = 0
+    for order, c in enumerate(commits):  # newest first: `order` sorts a node's commits the way git log shows them
+        n = _bridge_node(g, f"commit:{c.short}", "commit", {"id": c.short, "type": "commit", "title": c.subject,
+                                                            "status": "", "date": c.date, "sha": c.sha, "order": order},
+                         "git")
+        shas[c.sha] = n.path
+        n.links += [Link(f, 0, "changed", resolved=f) for f in c.files if f in g.nodes]
+        n.links += [Link(t, 0, "task") for t in c.tasks]
+        changed_code = [f for f in c.files if gl.is_code(f)]
+        if changed_code:
+            code, named = code + 1, named + bool(c.tasks)
+            files.update(changed_code)
+        for t in c.tasks:  # a task its todo line no longer holds (deleted 14 days after it was done) lives on in git
+            if t.startswith("D-"):
+                _bridge_node(g, f"task:{t}", "task", {"id": t, "type": "task", "title": c.subject, "status": "history"},
+                             f"git {c.short}")
+    g.coverage.update(commits=len(commits), since=commits[-1].date if commits else "", code_commits=code, code_named=named)
+    return shas, files
+
+
+def _add_tasks(g: Graph, gl) -> None:
+    """tasks/*.md: a node for each D-NNN line, linked to its receipt and to what the line names."""
+    lines = 0
+    for key in sorted(k for k, n in g.nodes.items() if n.layer == "file" and not n.foreign and re.fullmatch(r"tasks/[^/]+\.md", k)
+                      and Path(k).name.lower() != "readme.md"):
+        for e in gl.read_task_lines(key, _text(g, key)):
+            lines += 1
+            fm = {"id": e.id, "type": "task", "title": e.title, "status": "done" if e.done else "open"}
+            n = g.nodes.get(f"task:{e.id}")
+            if n is not None and n.origin.startswith("git"):  # named by a commit first: its line is the better source
+                n.fm, n.origin = fm, f"{key}:{e.line}"
+            n = _bridge_node(g, f"task:{e.id}", "task", fm, f"{key}:{e.line}")
+            if n.origin != f"{key}:{e.line}":
+                continue  # the same id on a second line: the tasks gate names it, the graph keeps the first
+            n.links.append(Link(key, e.line, "in", resolved=key, src=key))
+            n.links += [Link(i, line, "names", src=key) for i, line in e.named]
+            if e.receipt:
+                n.links.append(Link(e.receipt, e.line, "receipt", src=key))
+    history = sum(1 for n in g.nodes.values() if n.layer == "task" and n.status == "history")
+    g.coverage.update(task_lines=lines, task_history=history)
+
+
+def _add_entries(g: Graph, gl) -> None:
+    """Ids inside the project's documents, each a node of its own: proposals, the intent's goals, the specs'
+    requirements and criteria (a requirement names its goals), the plans' tasks (each names its requirements and
+    criteria)."""
+    readers = [(k, gl.read_proposals, "proposal") for k in (PROPOSALS_PATH,) if k in g.nodes]
+    for n in list(g.nodes.values()):
+        if n.layer != "file" or n.foreign:
+            continue
+        if n.type in ("intent", "spec"):
+            readers.append((n.path, gl.read_rows, "row"))
+        elif n.type == "plan":
+            readers.append((n.path, gl.read_plan_tasks, "plan-task"))
+    for key, read, kind in readers:
+        doc = g.nodes[key]
+        for e in read(key, _text(g, key)):
+            typ = {"REQ": "requirement", "AC": "criterion", "G": "goal"}.get(re.sub(r"[-\d]+$", "", e.id), kind)
+            ident = e.id if doc.type in ("intent", "memory") else f"{doc.id} {e.id}"
+            status = ("done" if e.done else "open") if kind in ("proposal", "plan-task") else ""
+            a = _bridge_node(g, f"{key}#{e.id}", "anchor", {"id": ident, "type": typ, "title": e.title, "status": status},
+                             f"{key}:{e.line}")
+            a.links.append(Link(key, e.line, "in", resolved=key, src=key))
+            for target, line in e.named:
+                a.links.append(Link(target, line, "goal" if target.startswith("G") else target.split("-")[0].lower(), src=key))
+
+
+def _add_actions(g: Graph, gl) -> None:
+    """The sessions (ADR-0018 §3): each episode's actions block links it to the files its session changed and read —
+    those the graph holds; a file gone since is history, not a broken bridge — and to the commits it made, checked the
+    way a receipt's are. An episode with no block, and one whose block says the transcript was not read, are counted."""
+    shown = unread = without = 0
+    since = ""
+    for n in list(g.nodes.values()):
+        if n.layer != "file" or n.foreign or n.type != "episode":
+            continue
+        acts = gl.read_actions(_text(g, n.path))
+        if acts is None or not acts.readable:
+            without += acts is None
+            unread += acts is not None
+            continue
+        shown += 1
+        day = str((n.fm or {}).get("date") or "")
+        if day and (not since or day < since):
+            since = day
+        n.links += [Link(p, line, "edited", resolved=p) for p, line in acts.changed if p in g.nodes and p != n.path]
+        n.links += [Link(p, line, "read", resolved=p) for p, line in acts.read if p in g.nodes and p != n.path]
+        n.links += [Link(sha, line, "made") for sha, line in acts.commits]
+    g.coverage.update(sessions=shown, sessions_since=since, sessions_unread=unread, sessions_without=without)
+
+
+def _add_code(g: Graph, gl) -> set[str]:
+    """The code layer (ADR-0018 §4): every code file is a node — other languages', and the engine's own in CODE_DOT_DIRS,
+    included — linked to the project files it imports, and to the ids its comments cite (§2; a TOML file's comments
+    too). A product's code folder is read (foreign for link checks, its code still in the graph); another session's
+    research is not. Returns the code files the layer holds — read, unreadable or without a reader."""
+    for rel in iter_code_files(g.root, gl.is_code):
+        if rel not in g.nodes:
+            g.nodes[rel] = Node(path=rel, foreign=rel.startswith(g.code_dirs))
+    known = gl.Known.of(k for k, n in g.nodes.items() if n.layer == "file")
+    seen, unread = set(), []
+    styles: dict[str, int] = {}
+    readers: dict[str, int] = {}
+    none: dict[str, int] = {}
+    dynamic = alias = unresolved = 0
+    for n in list(g.nodes.values()):
+        if n.layer != "file" or n.path.startswith(FOREIGN_PREFIXES):
+            continue
+        code, reader, style = gl.is_code(n.path), gl.import_reader(n.path), gl.comment_style(n.path)
+        if code:
+            seen.add(n.path)
+        if code and not reader:
+            kind = Path(n.path).suffix.lower() or Path(n.path).name
+            none[kind] = none.get(kind, 0) + 1
+        if not (reader or style):
+            continue
+        base = next((d.rstrip("/") for d in g.code_dirs if n.path.startswith(d)), "")
+        r = gl.read_code(n.path, _text(g, n.path), known, base)
+        if not r.readable:
+            unread.append(n.path)
+            continue
+        if style:
+            styles[style] = styles.get(style, 0) + 1
+        if reader:
+            readers[reader] = readers.get(reader, 0) + 1
+        n.links += [Link(t, line, "imports", resolved=t) for t, line in r.imports]
+        n.links += [Link(i, line, "cites") for i, line in gl.cited_ids(n.path, r.comments)]
+        dynamic, alias, unresolved = dynamic + r.dynamic, alias + r.alias, unresolved + r.unresolved
+    g.coverage.update(code_files=len(seen), code_styles=styles, code_unread=unread, import_readers=readers,
+                      import_none=none, import_dynamic=dynamic, import_alias=alias, import_unresolved=unresolved)
+    return seen
+
+
+def _text(g: Graph, key: str) -> str:
+    try:
+        return (g.root / key).read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+    except OSError:
+        return ""
+
+
+def _bridge_target(g: Graph, n: Node, ln: Link, docs: dict[str, str]) -> str | None:
+    """The node an id names: a decision, spec or plan by its id; a plan's task; a task; a proposal; inside a spec, its
+    requirement or criterion (by the plan's `spec:`); a goal of the intent (by the spec's `intent:`)."""
+    ident = ln.target
+    if ident.startswith(("ADR-", "SPEC-")):
+        return docs.get(ident)
+    if ident.startswith("PLAN-"):
+        plan, _, task = ident.partition(" ")
+        key = docs.get(plan)
+        return key if key and not task else (f"{key}#{task}" if key and f"{key}#{task}" in g.nodes else None)
+    if ident.startswith("D-"):
+        return f"task:{ident}" if f"task:{ident}" in g.nodes else None
+    if ident.startswith("P-"):
+        return f"{PROPOSALS_PATH}#{ident}" if f"{PROPOSALS_PATH}#{ident}" in g.nodes else None
+    doc = g.nodes.get((ln.src or n.path).split("#")[0])
+    via = "spec" if ident.startswith(("REQ-", "AC-")) else "intent"
+    home = next((x.path for x in _rel_targets(g, doc, via)), None) if doc else None
+    return f"{home}#{ident}" if home and f"{home}#{ident}" in g.nodes else None
+
+
+def _commit_key(g: Graph, gl, repo: Path, shas: dict[str, str] | None, sha: str) -> tuple[str | None, str | None]:
+    """The node of a commit a receipt or a session names: (key, None); (None, "no-commit") when this repository does not
+    hold it; (None, "unchecked") when git could not tell — no history was read, or the clone is shallow."""
+    key = next((k for full, k in (shas or {}).items() if full.startswith(sha)), None)
+    if key is None and shas is not None:  # not in the history HEAD reaches: another branch, or past MAX_COMMITS
+        ok = gl.commit_exists(repo, sha)
+        if ok:
+            key = _bridge_node(g, f"commit:{sha}", "commit", {"id": sha, "type": "commit", "title": "", "status": "",
+                                                              "sha": sha}, "git").path
+        elif ok is False and gl.git_answers(repo, "rev-parse", "--is-shallow-repository")[1] != "true":
+            return None, "no-commit"
+    return (key, None) if key else (None, "unchecked")
+
+
+def _resolve_receipt(g: Graph, gl, repo: Path, at_commit: bool, shas: dict[str, str] | None, top: set[str],
+                     ln: Link) -> None:
+    """A receipt names a commit or a file: the first one it names is the link; every one is checked."""
+    commits, paths = gl.receipt_parts(ln.target, top)
+    found: list[str] = []
+    for sha in commits:
+        key, problem = _commit_key(g, gl, repo, shas, sha)
+        if problem or key is None:
+            ln.problem, ln.target = problem or "unchecked", sha
+            return
+        found.append(key)
+    for token in paths:
+        ok = gl.path_status(g.root, repo, token, at_commit)
+        if ok is None:
+            ln.problem, ln.target = "unchecked", token
+            return
+        if not ok:
+            ln.problem, ln.target = "no-file", token
+            return
+        found += [k for k in (token, token + ".md") if k in g.nodes][:1]
+    ln.resolved = found[0] if found else None
+
+
 # ── Checks ───────────────────────────────────────────────────────────────────
 def check(g: Graph) -> list[Issue]:
     issues: list[Issue] = []
@@ -715,7 +1041,7 @@ def check(g: Graph) -> list[Issue]:
             for p in paths:
                 issues.append(Issue("error", "ID-DUP", p, 1, f"id {ident!r} is used by {len(paths)} files: {', '.join(paths)}", tuple(paths)))
 
-    known_ids = {n.id.lower(): n.stem for n in g.nodes.values() if n.fm and n.fm.get("id")}
+    known_ids = {n.id.lower(): n.stem for n in g.nodes.values() if n.fm and n.fm.get("id") and n.layer == "file"}
     for n in g.nodes.values():
         for ln in n.links:
             if ln.problem == "broken":
@@ -736,7 +1062,34 @@ def check(g: Graph) -> list[Issue]:
     issues += _check_chain_and_ledger(g)
     issues += _check_orphans(g)
     issues += _check_specs(g)
+    if g.layers:
+        issues += _check_bridges(g)
     return issues
+
+
+def _check_bridges(g: Graph) -> list[Issue]:
+    """A bridge whose target is not there, at its source line (ADR-0018 §2): an error in a file the commit being made
+    changes — as a broken link is —, a warning in an older file (a squash may legally take a commit away, and history is
+    not rewritten for a check); a bridge git could not check is a warning, never a pass."""
+    out = []
+    for n in g.nodes.values():
+        for ln in n.links:
+            code = BRIDGE_PROBLEMS.get(ln.problem or "")
+            if not code:
+                continue
+            src = ln.src or n.path
+            old = g.changed is not None and src not in g.changed
+            level = "warning" if code == "BRIDGE-GIT" or old else "error"
+            who = n.id if n.layer != "file" or ln.kind == "made" else "a comment"  # made: an episode's actions block
+            what = {"BRIDGE-COMMIT": f"{who} cites commit {ln.target}, which does not exist in this repository",
+                    "BRIDGE-FILE": f"{who}'s receipt names {ln.target}, which does not exist",
+                    "BRIDGE-ID": f"{who} names {ln.target}, which is nowhere in the project — correct it, or write it "
+                                 f"as code (`{ln.target}`) if it is only a name",
+                    "BRIDGE-GIT": f"{who} cites {ln.target}, which git could not check here (no repository, or a "
+                                  "shallow clone) — the bridge is unchecked"}[code]
+            out.append(Issue(level, code, src, ln.line, what + (" (a file this commit does not change)" if old and
+                                                                code != "BRIDGE-GIT" else "")))
+    return out
 
 
 def _rel_targets(g: Graph, n: Node, key: str) -> list[Node]:
@@ -818,7 +1171,7 @@ def _ledger_requirement(typ: str, st: str) -> str | None:
 
 def _check_orphans(g: Graph) -> list[Issue]:
     inbound: dict[str, int] = {}
-    for src, dst, _ in g.edges():
+    for src, dst, _ in g.knowledge_edges():
         if src != dst:
             inbound[dst] = inbound.get(dst, 0) + 1
     out = []
@@ -1189,29 +1542,99 @@ def project_stage(g: Graph) -> Stage:
 
 
 def to_json(g: Graph) -> dict:
-    return {
+    out = {
         "generated": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "root": str(g.root),
         "nodes": [{"key": n.path, "id": n.id, "type": n.type or ("file" if not n.path.endswith(".md") else "note"),
-                   "status": n.status, "title": n.title, "foreign": n.foreign} for n in g.nodes.values()],
+                   "status": n.status, "title": n.title, "foreign": n.foreign, "layer": n.layer}
+                  | ({"origin": n.origin} if n.origin else {}) for n in g.nodes.values()],
         "edges": [{"from": a, "to": b, "kind": k} for a, b, k in g.edges()],
     }
+    if g.layers:
+        out["coverage"] = g.coverage
+    return out
+
+
+def counts(g: Graph) -> tuple[int, int, int, int]:
+    """(knowledge nodes, knowledge links, bridge nodes, bridge links) — the files and the links they write, apart from
+    what add_layers read out of git, the task lines and the code comments."""
+    files = sum(1 for n in g.nodes.values() if n.layer == "file")
+    edges = g.edges()
+    known = len(g.knowledge_edges())
+    return files, known, len(g.nodes) - files, len(edges) - known
+
+
+def coverage_line(g: Graph) -> str:
+    """What the bridge readers read and what they could not (ADR-0018 §5) — the line every answer ends with, so a short
+    answer is never taken for a complete one."""
+    if not g.layers:
+        return "დაფარვა — მხოლოდ ცოდნის ფაილები; commit-ები, დავალებები, სესიები და კოდის ფენა არ წაკითხულა"
+    c, parts = g.coverage, []
+    if isinstance(c.get("commits"), str):
+        parts.append(f"commit-ები ვერ წავიკითხე ({c['commits']})")
+    else:
+        since = f", {c['since']}-დან" if c.get("since") else ""
+        parts.append(f"commit-ები: {c.get('commits', 0)}{since}; კოდის შემცვლელი {c.get('code_commits', 0)} commit-იდან "
+                     f"დავალებას {c.get('code_named', 0)} ასახელებს")
+    history = f", კიდევ {c['task_history']} — მხოლოდ git-ის ისტორიაში" if c.get("task_history") else ""
+    parts.append(f"დავალებები: {c.get('task_lines', 0)} ხაზი tasks/-ში{history}")
+    parts.append(_code_coverage(c))
+    shown = c.get("sessions", 0)
+    sessions = f"სესიები: {shown} ეპიზოდი მოქმედებებით" + (f", {c.get('sessions_since') or '?'}-დან" if shown else "")
+    if c.get("sessions_unread"):
+        sessions += (f", {c['sessions_unread']} ეპიზოდის ბლოკი მოქმედებებს არ ასახელებს (ჩანაწერი ვერ წაიკითხა ან ბლოკი "
+                     "გაწყვეტილია)")
+    if c.get("sessions_without"):
+        sessions += f", {c['sessions_without']} ეპიზოდს ბლოკი არ აქვს (ADR-0018 §3-მდე ან ჯერ ღიაა)"
+    parts.append(sessions)
+    return "დაფარვა — " + "; ".join(parts)
+
+
+def _counted(counts: dict, limit: int = 8) -> str:
+    items = sorted(counts.items())
+    return ", ".join(f"{k} {v}" for k, v in items[:limit]) + (" …" if len(items) > limit else "")
+
+
+def _code_coverage(c: dict) -> str:
+    """The code layer's part of the coverage line (ADR-0018 §4, §5): which reader read how many files, which stayed
+    without one, what an import reader cannot follow, and the code git knows outside the layer."""
+    files = c.get("code_files", 0)
+    text = f"კოდი: {files} ფაილი"
+    if files:
+        text += f" — იმპორტები: {_counted(c.get('import_readers') or {}) or '—'}"
+        if c.get("import_none"):
+            text += f", იმპორტის წამკითხველი არ აქვს: {_counted(c['import_none'])}"
+    if c.get("code_styles"):
+        text += f"; კომენტარები: {_counted(c['code_styles'])}"
+    if c.get("code_unread"):
+        text += f"; ვერ წაიკითხა {len(c['code_unread'])} ფაილი"
+    if files:
+        found = [f"{word} {c[key]}" for key, word in (("import_dynamic", "დინამიკური"), ("import_alias", "ფსევდონიმი"))
+                 if c.get(key)]
+        text += "; დინამიკურ იმპორტსა და ფსევდონიმიან გზას (`@/…`) არ მიჰყვება" + (f" ({', '.join(found)})" if found else "")
+    if c.get("import_unresolved"):
+        text += f"; {c['import_unresolved']} იმპორტის გზას გრაფში ფაილი არ შეესაბამება"
+    if c.get("code_missed"):
+        text += f"; git-ის ისტორიის კიდევ {c['code_missed']} კოდის ფაილი ამ ფენის გარეთაა ({_counted(c['code_missed_kinds'])})"
+    return text
 
 
 def context_map(g: Graph, issues: list[Issue]) -> str:
     errors = [i for i in issues if i.level == "error"]
     inbound: dict[str, int] = {}
     outbound: dict[str, int] = {}
-    for a, b, _ in g.edges():
+    for a, b, _ in g.knowledge_edges():
         outbound[a] = outbound.get(a, 0) + 1
         inbound[b] = inbound.get(b, 0) + 1
+    files, known, bridge_nodes, bridges = counts(g)
     lines = [
         "# კონტექსტის რუკა (context map)",
         "",
         f"_გენერირებულია {dt.datetime.now().astimezone().isoformat(timespec='seconds')} — `tools/context_graph.py build`; "
         "ხელით არ იცვლება, git-ში არ ინახება._",
         "",
-        f"კვანძები: {len(g.nodes)} · კავშირები: {len(g.edges())} · შეცდომები: {len(errors)}",
+        f"კვანძები: {files} · კავშირები: {known} · შეცდომები: {len(errors)}"
+        + (f" · ხიდები: {bridges} ({bridge_nodes} კვანძი — commit-ები, დავალებები, ჩანაწერები)" if g.layers else ""),
         "",
         "## მფლობელის დასამტკიცებელი",
         "",
@@ -1231,10 +1654,19 @@ def context_map(g: Graph, issues: list[Issue]) -> str:
         lines += ["", f"## {typ}", "", "| id | სათაური | სტატუსი | ფაილი | ← | → |", "|---|---|---|---|---|---|"]
         for n in group:
             lines.append(f"| {n.id} | {n.title} | {n.status} | `{n.path}` | {inbound.get(n.path, 0)} | {outbound.get(n.path, 0)} |")
-    rel = [(a, b, k) for a, b, k in g.edges() if k != "link"]
+    rel = [(a, b, k) for a, b, k in g.knowledge_edges() if k in RELATION_TYPES]
     if rel:
         lines += ["", "## ტიპიზებული კავშირები", ""]
         lines += [f"- {g.nodes[a].id} —{k}→ {g.nodes[b].id if b in g.nodes else b}" for a, b, k in rel]
+    if g.layers:
+        kinds: dict[str, int] = {}
+        for _, _, k in g.edges():
+            if k in BRIDGE_KINDS:
+                kinds[k] = kinds.get(k, 0) + 1
+        lines += ["", "## ხიდები ([[ADR-0018-agentic-graph-layers-and-bridges]])", "",
+                  "ერთი კვანძის გზა: `bash .claude/hooks/py.sh tools/context_graph.py why <ფაილი ან id>` (რატომ არის ასე) · "
+                  "`… impact <ფაილი ან id>` (რას ეხება ცვლილება)", "",
+                  " · ".join(f"{k}: {kinds[k]}" for k in sorted(kinds)) or "ხიდი არ არის", "", coverage_line(g)]
     if errors:
         lines += ["", "## შეცდომები", ""] + [f"- {i.fmt()}" for i in errors[:40]]
     return "\n".join(lines) + "\n"
@@ -1248,55 +1680,160 @@ def build(g: Graph, issues: list[Issue]) -> Path:
     return out
 
 
-def query(g: Graph, ident: str, depth: int) -> str:
-    start = g.find(ident)
-    if not start:
-        return f"not found: {ident!r} (try a file stem such as intent, plan, ADR-0001-..., or an id)"
-    fwd: dict[str, list[tuple[str, str]]] = {}
-    back: dict[str, list[tuple[str, str]]] = {}
-    for a, b, k in g.edges():
-        if a == b:
+# A node's neighbours are shown kind by kind, at most PER_KIND of each (the rest: „… და კიდევ N"), and an answer stops at
+# MAX_LINES — a short answer the agent can read in one go (ADR-0018 §5). Knowledge links first, then the bridges.
+PER_KIND = {"query": 12, "why": 6, "impact": 6}
+MAX_LINES = 80
+KIND_ORDER = [*RELATION_TYPES, "link", "imports", "names", "req", "ac", "goal", "cites", "task", "receipt", "in", "changed",
+              "made", "edited", "read"]
+WHY_KINDS = {"task", "names", "req", "ac", "goal", "cites", "intent", "spec", "adrs", "depends_on", "supersedes"}
+IMPACT_KINDS = {"link", *RELATION_TYPES, "names", "req", "ac", "goal", "cites"}
+
+
+def _label(g: Graph, key: str) -> str:
+    n = g.nodes.get(key)
+    if not n or not n.type:
+        return key  # untyped note or plain file: its path says the most
+    date = str((n.fm or {}).get("date") or "") if n.layer == "commit" else ""
+    meta = ", ".join(x for x in (n.type, n.status, date) if x)
+    where = f" — {n.origin}" if n.layer in ("task", "anchor") and n.origin else ""
+    return f"{n.stem} ({meta}) {n.title}".rstrip() + where
+
+
+def _started(n: Node) -> float:
+    """When an episode's session began — its `started`, else its `date`; 0 when neither reads as a time."""
+    for raw in ((n.fm or {}).get("started"), (n.fm or {}).get("date")):
+        try:
+            return dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError, OverflowError, OSError):
             continue
-        fwd.setdefault(a, []).append((b, k))
-        back.setdefault(b, []).append((a, k))
+    return 0.0
 
-    def label(key: str) -> str:
-        n = g.nodes.get(key)
-        if not n or not n.type:
-            return key  # untyped note or plain file: its path says the most
-        meta = ", ".join(x for x in (n.type, n.status) if x)
-        return f"{n.stem} ({meta}) {n.title}".rstrip()
 
-    lines = [f"{label(start.path)}  [{start.path}]"]
+def _rank(g: Graph, key: str) -> tuple[int, float, str]:
+    """Commits newest first, the way git log shows them; sessions newest first too; everything else by its key."""
+    n = g.nodes.get(key)
+    if n is not None and n.layer == "commit":
+        return 0, int((n.fm or {}).get("order", 10 ** 9)), key
+    if n is not None and n.type == "episode":
+        return 1, -_started(n), key
+    return 2, 0, key
+
+
+def trace(g: Graph, start: Node, follow, depth: int, per_kind: int, once: bool = False) -> str:
+    """The tree of what `follow(key)` allows from start — [(direction "fwd"/"back", {kinds})] for each node —, each node
+    opened once, `depth` levels deep, ending with the coverage line. `once`: a neighbour reached two ways from one node
+    (a commit names its task, and the task's receipt names the commit) is shown the first way only."""
+    fwd: dict[str, set[tuple[str, str]]] = {}
+    back: dict[str, set[tuple[str, str]]] = {}
+    for a, b, k in g.edges():
+        if a != b:
+            fwd.setdefault(a, set()).add((b, k))
+            back.setdefault(b, set()).add((a, k))
+    lines = [f"{_label(g, start.path)}  [{start.path}]"]
     seen = {start.path}
 
+    def order(kind: str) -> tuple[int, str]:
+        return (KIND_ORDER.index(kind) if kind in KIND_ORDER else len(KIND_ORDER)), kind
+
     def walk(key: str, level: int) -> None:
-        if level > depth:
-            return
-        for tgt, k in sorted(set(fwd.get(key, []))):
-            lines.append(f"{'  ' * level}→ {label(tgt)} [{k}]")
-            if tgt not in seen:
-                seen.add(tgt)
-                walk(tgt, level + 1)
-        for src, k in sorted(set(back.get(key, []))):
-            lines.append(f"{'  ' * level}← {label(src)} [{k}]")
-            if src not in seen:
-                seen.add(src)
-                walk(src, level + 1)
+        shown: set[str] = set()
+        for direction, kinds in follow(key):
+            by_kind: dict[str, list[str]] = {}
+            pairs = sorted(((o, k) for o, k in (fwd if direction == "fwd" else back).get(key, set()) if k in kinds),
+                           key=lambda p: order(p[1]))
+            for other, k in pairs:
+                if once and other in shown:
+                    continue
+                by_kind.setdefault(k, []).append(other)
+                shown.add(other)
+            for k in sorted(by_kind, key=order):
+                others = sorted(by_kind[k], key=lambda x: _rank(g, x))
+                for other in others[:per_kind]:
+                    lines.append(f"{'  ' * level}{'→' if direction == 'fwd' else '←'} {_label(g, other)} [{k}]")
+                    if other not in seen and level < depth and len(lines) <= MAX_LINES:
+                        seen.add(other)
+                        walk(other, level + 1)
+                if len(others) > per_kind:
+                    lines.append(f"{'  ' * level}  … და კიდევ {len(others) - per_kind} [{k}]")
 
     walk(start.path, 1)
-    return "\n".join(lines)
+    if len(lines) > MAX_LINES + 1:
+        lines[MAX_LINES + 1:] = [f"… და კიდევ {len(lines) - MAX_LINES - 1} ხაზი (ზღვარი — {MAX_LINES}; ვიწრო კითხვისთვის "
+                                 "ნაკლები --depth)"]
+    return "\n".join(lines + [coverage_line(g)])
+
+
+def _not_found(g: Graph, ident: str) -> str:
+    return (f"not found: {ident!r} (try a file stem such as intent, plan, ADR-0001-..., an id such as D-001 or REQ-001, "
+            f"or a commit's hash)\n{coverage_line(g)}")
+
+
+def query(g: Graph, ident: str, depth: int) -> str:
+    """One node's neighbourhood, both ways, every kind of link."""
+    start = g.find(ident)
+    if not start:
+        return _not_found(g, ident)
+    every = set(KIND_ORDER) | BRIDGE_KINDS
+    return trace(g, start, lambda _key: [("fwd", every), ("back", every)], depth, PER_KIND["query"])
+
+
+def why(g: Graph, ident: str, depth: int) -> str:
+    """„Why is this so?" (ADR-0018 §2): a file → the commits that changed it → the task each names → what the task names
+    (decision, spec, plan) → a plan task's requirement and criterion → the requirement's goal — and what the file's own
+    comments and frontmatter cite."""
+    start = g.find(ident)
+    if not start:
+        return _not_found(g, ident)
+
+    def follow(key: str) -> list[tuple[str, set[str]]]:
+        n = g.nodes.get(key)
+        layer = n.layer if n else "file"
+        if layer == "commit":  # the task its message names, the task its receipt names, the session that made it
+            return [("fwd", {"task"}), ("back", {"receipt", "made"})]
+        steps = [("back", {"changed"})] if key == start.path and layer == "file" else []
+        return steps + [("fwd", WHY_KINDS | ({"in"} if layer == "anchor" else set()))]
+
+    return trace(g, start, follow, depth, PER_KIND["why"], once=True)
+
+
+def impact(g: Graph, ident: str, depth: int) -> str:
+    """„What does a change touch?" (ADR-0018 §2): what links to it, names it or cites it — the documents, tasks, plan tasks
+    and code comments that rely on it —, for a code file the files that import it and, a level further, the files that
+    import those (§4), the commits that changed it, with the task each was made for, and the sessions that changed it,
+    newest first (§3)."""
+    import graph_layers as gl  # here, not at the top (see add_layers)
+    start = g.find(ident)
+    if not start:
+        return _not_found(g, ident)
+    code = start.layer == "file" and gl.is_code(start.path)
+
+    def follow(key: str) -> list[tuple[str, set[str]]]:
+        n = g.nodes.get(key)
+        layer = n.layer if n else "file"
+        if layer == "commit":
+            return [("fwd", {"task"})]  # the task the commit was made for
+        if key != start.path:  # one step on: a requirement's plan tasks, a goal's requirements, an importer's importers
+            if layer == "anchor":
+                return [("back", {"req", "ac", "goal", "names", "cites"})]
+            return [("back", {"imports"})] if layer == "file" and code else []
+        extra = ({"in"} | ({"changed", "edited", "imports"} if layer == "file" else set())
+                 | ({"task"} if layer in ("task", "anchor") else set()))
+        return [("back", IMPACT_KINDS | extra)]
+
+    return trace(g, start, follow, depth, PER_KIND["impact"], once=True)
 
 
 def brief(g: Graph, issues: list[Issue]) -> str:
     errors = [i for i in issues if i.level == "error"]
     pend, eng = pending(g), pending(g, engine=True)
+    files, known, _, bridges = counts(g)
     lines = [
         project_stage(g).block(),
         "",
         "## კონტექსტის გრაფი (tools/context_graph.py)",
-        f"- {len(g.nodes)} კვანძი, {len(g.edges())} კავშირი, შეცდომა: {len(errors)}"
-        + (" — გაასწორე, სანამ სხვა სამუშაოს დაიწყებ:" if errors else ""),
+        f"- {files} კვანძი, {known} კავშირი" + (f", {bridges} ხიდი (ADR-0018)" if g.layers else "")
+        + f", შეცდომა: {len(errors)}" + (" — გაასწორე, სანამ სხვა სამუშაოს დაიწყებ:" if errors else ""),
     ]
     lines += [f"  - {i.fmt()}" for i in errors[:5]]
     if len(errors) > 5:
@@ -1322,9 +1859,10 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("check")
     c.add_argument("files", nargs="*")
     c.add_argument("--json", action="store_true")
-    q = sub.add_parser("query")
-    q.add_argument("ident")
-    q.add_argument("--depth", type=int, default=1)
+    for name, depth in (("query", 1), ("why", 4), ("impact", 2)):
+        q = sub.add_parser(name)
+        q.add_argument("ident")
+        q.add_argument("--depth", type=int, default=depth)
     sub.add_parser("pending")
     sub.add_parser("stage")
     sub.add_parser("brief")
@@ -1333,13 +1871,17 @@ def main(argv: list[str] | None = None) -> int:
     if not (root / "intent.md").exists() and not (root / "docs").is_dir():
         print(f"INCONCLUSIVE: {root} does not look like the project root (no intent.md, no docs/)", file=sys.stderr)
         return 2
-    g = load(root)
+    if a.cmd == "brief" and os.environ.get("EPISODIC_NESTED") == "1":
+        return 0  # a nested session (claude -p from a script) gets no brief: nothing to load
+    # the bridges (ADR-0018) for every view and the check; `pending` and `stage` read the documents' statuses alone
+    g = load(root, layers=a.cmd not in ("pending", "stage"))
     md_count = sum(1 for n in g.nodes.values() if n.path.endswith(".md") and not n.foreign)
     issues = check(g)
 
     if a.cmd == "build":
         out = build(g, issues)
-        print(f"built {out.relative_to(root).as_posix()}/ — {len(g.nodes)} nodes, {len(g.edges())} edges, "
+        files, known, _, bridges = counts(g)
+        print(f"built {out.relative_to(root).as_posix()}/ — {files} nodes, {known} edges, {bridges} bridges, "
               f"{sum(i.level == 'error' for i in issues)} errors")
         return 0
     if a.cmd == "check":
@@ -1357,9 +1899,11 @@ def main(argv: list[str] | None = None) -> int:
             scope = f"{len(a.files)} file(s)" if a.files else "whole vault"
             print(f"GRAPH-CHECK {'FAIL' if n_err else 'OK'}: {md_count} files scanned, scope={scope}, "
                   f"errors={n_err}, warnings={n_warn}")
+            print(coverage_line(g))
         return 1 if any(i.level == "error" for i in shown) else 0
-    if a.cmd == "query":
-        print(printable(query(g, a.ident, max(1, a.depth))))
+    if a.cmd in ("query", "why", "impact"):
+        view = {"query": query, "why": why, "impact": impact}[a.cmd]
+        print(printable(view(g, a.ident, max(1, a.depth))))
         return 0
     if a.cmd == "pending":
         pend, eng = pending(g), pending(g, engine=True)
@@ -1376,8 +1920,6 @@ def main(argv: list[str] | None = None) -> int:
         print(project_stage(g).block())
         return 0
     if a.cmd == "brief":
-        if os.environ.get("EPISODIC_NESTED") == "1":
-            return 0
         try:
             build(g, issues)
         except OSError as e:

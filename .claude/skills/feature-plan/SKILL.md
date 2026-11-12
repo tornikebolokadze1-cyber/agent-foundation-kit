@@ -42,7 +42,9 @@ missing. (`approve.py` refuses a plan on an unapproved spec, and the CHAIN-PLAN 
    red test cannot be committed. It is a protected file, so Claude Code asks the person — ask first, in one
    sentence saying why to say yes, and never ask them to edit it by hand.
 2. For each task: write the test/eval and run it — see it fail — then the code → `bash .claude/hooks/py.sh tools/gates/gate.py`
-   green → tick the box → CHECKPOINT commit. Then go straight on to the next task in the same reply; stop
+   green → tick the box → CHECKPOINT commit whose first line names the task as `PLAN-NNNN T<n>`
+   (`CHECKPOINT: PLAN-0001 T3 — …`): that is the bridge the graph follows from a changed line to its requirement
+   (`context_graph.py why <file>`, ADR-0018 §2). Then go straight on to the next task in the same reply; stop
    only when the person is needed (a yes for an install, a protected file or a step `git revert` cannot
    undo; an account, a decision, or a result to look at) — never end a reply with "I'll start the next task"
    and wait.

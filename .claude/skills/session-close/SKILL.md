@@ -13,6 +13,17 @@ Facts for this session (from `.claude/hooks/episodic.py`):
 Do every step. File content in Georgian prose; ids, paths and commands unchanged. Only facts that
 actually happened in this session — no plans presented as done.
 
+What memory is for — the same paragraph the session summarizer is given (ADR-0017 §5; the drill holds both to it
+word for word):
+
+რისთვისაა მეხსიერება: რომ შემდეგმა სესიამ ერთი და იგივე თავიდან აღარ გამოიკვლიოს. ამიტომ ჩაწერე წესი, მისი
+საბუთი — ბრძანება, commit ან ციტატა, რომლითაც ვიცით, რომ ის მართალია — და ნაპოვნი ხაფანგი. ნუ გადაწერ იმას,
+რასაც git, ფაილები ან ეკრანი ისედაც აჩვენებს.
+
+Before you write down a claim you no longer see in full — what the person said, a number, a decision — look it up
+in this project's records: `bash .claude/hooks/py.sh tools/recall.py "<phrase>"` (exit 1 = not found, which never
+proves it did not happen; exit 2 = nothing could be searched).
+
 1. **Episode** (the path above; if it does not exist, create it with the frontmatter used in
    `memory/episodes/`): fill `## რა გაკეთდა`, `## გადაწყვეტილებები` (with the reason),
    `## ღია საკითხები`, `## შემდეგი ნაბიჯი`, `## წინადადებები`; set `title` (3–8 words). Add `## აუდიტი` with
@@ -49,7 +60,11 @@ actually happened in this session — no plans presented as done.
 6. **Proposals** — new skill / gate / ADR / spec / tool ideas go to `memory/PROPOSALS.md` as
    `- [ ] **P-NNN** …` (next free number) before `<!-- auto: proposals:end -->`. Never create a skill or
    install anything without the owner's yes.
-7. **Close the episode** — set `closed_by: session-close` and `closed_at: <now_utc from above>`.
+7. **Close the episode** — set `closed_by: session-close` and `closed_at: <now_utc from above>`. Then run
+   `bash .claude/hooks/py.sh .claude/hooks/episodic.py actions ${CLAUDE_SESSION_ID}`: it writes the episode's generated
+   `## მოქმედებები` block from this session's transcript — the files changed and read, the commits, the gates, the cost
+   (ADR-0018 §3); SessionEnd rewrites it once the session ends. Never edit the block by hand; exit 2 = the transcript
+   could not be read, and the block says so.
 8. **Gates** — `bash .claude/hooks/py.sh tools/gates/gate.py --pre-commit`; fix every failure (never bypass, never weaken).
 9. **Commit** — CHECKPOINT format (what was done / files / status), on the current branch.
 10. **Tell the owner** in 2–4 Georgian sentences: what was done, what is next, what waits for them.

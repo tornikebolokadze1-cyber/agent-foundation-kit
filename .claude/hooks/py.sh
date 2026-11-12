@@ -31,11 +31,17 @@
 #   5. python3, the same way.
 # Written for bash 3.2, which is what macOS runs as `bash`.
 #
-# If no interpreter is found the script exits 1: Claude Code shows that as a visible
-# hook error and lets the tool call through. That is deliberate — a missing Python
-# must be loud, but must not freeze every edit in the project. The agent never sees a
-# hook error, though, so at session start (`episodic.py start`) the script instead prints
-# a notice that reaches both the person and the agent, and exits 0.
+# If no interpreter is found the script exits 1. What Claude Code does with that depends on
+# the hook. The guard's PreToolUse hook carries `onFailure: "block"` (ADR-0015, point 5), so
+# an Edit, a Write or a shell call does not go through: a guard that could not run must not
+# read as "allowed". Claude Code hands the agent the line this script printed as the reason
+# (probed live on Claude Code 2.1.321, 2026-11-10). The other hooks — sentinel, stop
+# gate, session memory — exit 1 the ordinary way: the person sees a hook error and the
+# session goes on without them. The agent sees none of those errors, so at
+# session start (`episodic.py start`) the script instead prints a notice that reaches both
+# the person and the agent, and exits 0. Both texts say what will happen — the calls are
+# refused until Python is installed — because an agent told "the hooks are off" goes on
+# without them, and tells the person the same.
 set -u
 SRC="${BASH_SOURCE[0]}"
 [ "${OS:-}" = "Windows_NT" ] && SRC="${SRC//\\//}"  # a Windows path may arrive with backslashes
@@ -135,11 +141,12 @@ fi
 
 if [ "$found" = 0 ]; then
   if [ "${1:-}" = ".claude/hooks/episodic.py" ] && [ "${2:-}" = "start" ]; then
-    # The install commands are also INSTALL["python"] in firstrun.py (bash cannot import it): change both together.
-    printf '%s\n' '{"systemMessage": "⚠ ძრავა: Python 3.12 ან უფრო ახალი ვერ მოიძებნა — დარაჯი და სამუშაო მეხსიერება ამ სესიაში გამორთულია. დააყენე Python 3.12 (Windows: winget install Python.Python.3.12; Mac: brew install python@3.12; Linux: sudo apt install python3.12, სხვაგან uv python install 3.12) და თავიდან გახსენი ტერმინალი ან VS Code.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "PY-MISSING: no Python 3.12+ was found, so the engine hooks are OFF in this session (no guard, no sentinel, no working memory). Before any work, tell the person in Georgian to install Python 3.12 and restart the terminal or VS Code (install commands: the notice above; L-020)."}}'
+    # The install commands stand twice in the line below — for the person and for the agent, who repeats them — and
+    # once more as INSTALL["python"] in firstrun.py (bash cannot import it): change all three together.
+    printf '%s\n' '{"systemMessage": "⚠ ძრავა: Python 3.12 ან უფრო ახალი ვერ მოიძებნა. სანამ არ დაყენდება, Claude ამ პროექტში ვერც ფაილს შეცვლის და ვერც ბრძანებას გაუშვებს: დარაჯი (guard) Python-ის გარეშე ვერ ეშვება, ამიტომ Claude Code ყოველ ასეთ მოქმედებას აჩერებს; სამუშაო მეხსიერებაც არ ჩაიტვირთა. დააყენე Python 3.12 (Windows: winget install Python.Python.3.12; Mac: brew install python@3.12; Linux: sudo apt install python3.12, სხვაგან uv python install 3.12) და თავიდან გახსენი ტერმინალი ან VS Code.", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "PY-MISSING: no Python 3.12+ was found, so the engine hooks cannot run in this session: every Edit, Write and shell call will be stopped (the guard hook fails closed — onFailure: block), and there is no sentinel and no working memory. Do not look for a way around it. Before anything else, tell the person in Georgian to install Python 3.12 and restart the terminal or VS Code (Windows: winget install Python.Python.3.12; Mac: brew install python@3.12; Linux: sudo apt install python3.12, elsewhere uv python install 3.12; L-020)."}}'
     exit 0
   fi
-  echo "PY-MISSING: no Python 3.12+ found (\$ENGINE_PYTHON, py, python3.12…3.15, python3) — project hooks are OFF until one is installed" >&2
+  echo "PY-MISSING: no Python 3.12+ found (\$ENGINE_PYTHON, py, python3.12…3.15, python3) — nothing ran. The project hooks cannot run until one is installed: Claude Code stops every edit and shell call (the guard hook, onFailure: block)" >&2
   exit 1
 fi
 

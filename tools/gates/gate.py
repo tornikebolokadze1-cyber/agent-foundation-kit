@@ -5,7 +5,7 @@
   bash .claude/hooks/py.sh tools/gates/gate.py                  every enabled gate, whole project
   bash .claude/hooks/py.sh tools/gates/gate.py --pre-commit     gates marked pre_commit, on what the commit records
   bash .claude/hooks/py.sh tools/gates/gate.py --files F [F…]   gates marked stop, restricted to these files
-  bash .claude/hooks/py.sh tools/gates/gate.py --only graph,json
+  bash .claude/hooks/py.sh tools/gates/gate.py --only graph,json   these gates; a name no gate has is INCONCLUSIVE
   bash .claude/hooks/py.sh tools/gates/gate.py --list
 
 Exit 0 = every enabled gate passed · 1 = at least one FAILED · 2 = INCONCLUSIVE (a gate
@@ -23,6 +23,8 @@ not staged at all still reaches a `cmd` gate or the drill as it is on disk.
 from __future__ import annotations
 
 import argparse
+import ast
+import importlib.util
 import json
 import os
 import re
@@ -51,9 +53,16 @@ import context_graph as cg  # noqa: E402
 import drill_floor  # noqa: E402
 import engine_line  # noqa: E402
 import redact  # noqa: E402
+# One implementation of "does this commit, this path exist" for the tasks gate, the memory gate and the graph's bridges
+# (ADR-0018 §2): it lives in the graph's leaf module.
+from graph_layers import (COMMENT_STYLES, IMPORT_READERS, SHA_RE, TASK_DONE_RE, TASK_ID_RE, TASK_LINE_RE,  # noqa: E402
+                          commit_exists, git_answers, path_claim, path_status)
 
 TEXT_SUFFIXES = {".py", ".sh", ".md", ".json", ".toml", ".txt", ".yml", ".yaml", ".js", ".ts", ".css", ".html", ".csv"}
 TEXT_NAMES = {".gitignore", ".gitattributes", ".editorconfig", ".env.example", "pre-commit"}
+# What the graph's code layer reads (ADR-0018 §4) is exported with its text at commit too: a file exported empty would
+# hide its imports and the ids its comments cite from the commit's graph check (a .tsx, an .mjs, a .scss)
+CODE_TEXT_SUFFIXES = frozenset(COMMENT_STYLES) | frozenset(IMPORT_READERS)
 
 
 @dataclass
@@ -110,10 +119,11 @@ def pick(files: list[Path], suffixes: set[str], names: set[str] = frozenset()) -
 
 
 # ── builtin checkers ─────────────────────────────────────────────────────────
-def gate_graph(root: Path, files: list[Path] | None, **_) -> Result:
+def gate_graph(root: Path, files: list[Path] | None, repo: Path | None = None, **_) -> Result:
     if not (root / "intent.md").exists() and not (root / "docs").is_dir():
         return Result("graph", "INCONCLUSIVE", f"{root} does not look like the project root")
-    g = cg.load(root)
+    # the bridges too (ADR-0018 §2): at commit `root` is a copy of the index and `repo` the repository it came from
+    g = cg.load(root, layers=True, repo=repo or root, at_commit=repo is not None and repo != root)
     scanned = sum(1 for n in g.nodes.values() if n.path.endswith(".md") and not n.foreign)
     if scanned == 0:
         return Result("graph", "INCONCLUSIVE", "0 knowledge files scanned")
@@ -123,8 +133,11 @@ def gate_graph(root: Path, files: list[Path] | None, **_) -> Result:
     errors = [i for i in issues if i.level == "error"]
     warns = [i for i in issues if i.level == "warning"]
     scope = f"{len(files)} file(s)" if files is not None else "whole vault"
-    s = f"{scanned} notes, {len(g.edges())} links; scope={scope}; errors={len(errors)}, warnings={len(warns)}"
-    return Result("graph", "FAIL" if errors else "PASS", s, [i.fmt() for i in errors + warns][:40])
+    _, links, _, bridges = cg.counts(g)
+    unread = g.coverage.get("commits") if isinstance(g.coverage.get("commits"), str) else ""
+    s = (f"{scanned} notes, {links} links, {bridges} bridges{f' (commits not read: {unread})' if unread else ''}; "
+         f"scope={scope}; errors={len(errors)}, warnings={len(warns)}")
+    return Result("graph", "FAIL" if errors else "PASS", s, [i.fmt() for i in errors + warns][:40], notice=bool(unread))
 
 
 # JSON with comments and trailing commas (JSONC): the TypeScript and VS Code settings files a scaffold writes
@@ -416,23 +429,8 @@ def gate_instructions(root: Path, files: list[Path], **_) -> Result:
 
 
 # tasks/*.md — the agent's concrete task list. A box means something only when a ticked item carries a date and
-# evidence, and a commit it cites really exists (atlas-orchestrator's "closure receipt").
-TASK_LINE_RE = re.compile(r"^\s*[-*] \[([ xX])\] (.*)$")
-TASK_ID_RE = re.compile(r"^(D-\d{3,}) — \S")
-TASK_DONE_RE = re.compile(r"✓ (\d{4}-\d{2}-\d{2})(?: · (.+))?$")
-# A commit is a word of its own with a digit in it: not the session part of an episode's name (EP-…-515c117b.md), a
-# piece of a path or a link, or an English word made of the letters a–f, such as `defaced` (review M6).
-SHA_RE = re.compile(r"(?<![\w./:#-])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}(?![\w/:#-]|\.\w)")
-
-
-def commit_exists(root: Path, sha: str) -> bool | None:
-    try:
-        r = subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{sha}^{{commit}}"], capture_output=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return r.returncode == 0
-
-
+# evidence, and a commit it cites really exists (atlas-orchestrator's "closure receipt"). The line, its receipt and the
+# commit check come from tools/graph_layers.py, which the graph's bridges read the same way.
 def gate_tasks(root: Path, files: list[Path], repo: Path | None = None, **_) -> Result:
     todo = sorted(p for p in (root / "tasks").glob("*.md") if p.name.lower() != "readme.md") if (root / "tasks").is_dir() else []
     if not todo:
@@ -617,9 +615,168 @@ def gate_drill(root: Path, files: list[Path], pre_commit: bool = False, gate: di
                   notice="LEFT OUT" in last)
 
 
+# memory — the top layer every session trusts before it reads anything else (ADR-0017 §2): the lessons index (CLAUDE.md
+# loads it) and the three auto blocks the start brief shows. A claim there that a machine can check is checked — a
+# commit, a file path, a D-, P- or L- number, a drill group — and a block the brief would cut fails instead of being cut
+# in silence. The log below the blocks is history: it is not read.
+MEMORY_BLOCKS = (("progress.md", "current-state"), ("plan.md", "current-phase"), ("tasks/todo.md", "todo-now"))
+LESSONS_INDEX = "memory/LESSONS.md"
+REGISTERS = {"D": "tasks/*.md", "P": "memory/PROPOSALS.md", "L": LESSONS_INDEX}
+GEORGIAN = f"{chr(0x10D0)}-{chr(0x10FF)}"
+# A commit as the tasks gate reads one, and one a Georgian ending follows (`15d0999-ზე`). A commit of another repository
+# carries that repository's name in front (`kit:f4d7b77`): it is not this repository's to check.
+MEMORY_SHA_RE = re.compile(rf"(?<![\w./:#-])(?=[0-9a-f]*[0-9])[0-9a-f]{{7,40}}(?![\w/:#]|-(?![{GEORGIAN}])|\.\w)")
+MEMORY_ID_RE = re.compile(r"(?<![\w-])([DPL]-\d{3,})(?!\d)")
+PROPOSAL_LINE_RE = re.compile(r"(?m)^\s*[-*] \[[ xX]\] \*\*(P-\d{3,})\*\*")
+LESSON_LINE_RE = re.compile(r"(?m)^[-*] \*\*(L-\d{3,})\b")
+MEMORY_TICK_RE = re.compile(r"`([^`\n]+)`")
+GUARDED_RE = re.compile(r"drill \(([^)\n]*)\)")
+GROUP_NAME_RE = re.compile(r"`([a-z_]+)`")
+EPISODIC = HERE.parents[1] / ".claude" / "hooks" / "episodic.py"
+
+
+def brief_limits() -> tuple[dict, int, object] | str:
+    """The start brief's own limits and block reader — BLOCK_CAPS, WORKING_LINES, extract_block — from episodic.py, so
+    the gate and the brief can never disagree on them; what went wrong when they cannot be read."""
+    try:
+        spec = importlib.util.spec_from_file_location("episodic_brief", EPISODIC)
+        if spec is None or spec.loader is None:
+            return f"no module at {EPISODIC}"
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod  # its dataclasses look themselves up there
+        spec.loader.exec_module(mod)
+        return dict(mod.BLOCK_CAPS), int(mod.WORKING_LINES), mod.extract_block
+    except Exception as e:  # noqa: BLE001 — any failure leaves the blocks unmeasured, and the gate says so
+        return f"{type(e).__name__}: {e}"
+
+
+def drill_groups(root: Path) -> tuple[set[str] | None, str]:
+    """The drill's groups (`GROUPS` in drill.py) — the checked tree's drill.py, else the engine's own — and which one."""
+    own = root / "tools/gates/drill.py"
+    path, label = (own, "tools/gates/drill.py") if own.is_file() else (DRILL_SCRIPT, "the engine's drill.py")
+    try:
+        for node in ast.parse(path.read_text(encoding="utf-8", errors="replace")).body:
+            if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "GROUPS" for t in node.targets):
+                value = ast.literal_eval(node.value)
+                if isinstance(value, list) and all(isinstance(v, str) for v in value):
+                    return set(value), label
+    except (OSError, SyntaxError, ValueError):
+        pass
+    return None, label
+
+
+def memory_registers(root: Path) -> dict[str, set[str]]:
+    """Where a number lives: D — a task line in tasks/*.md, P — a proposal line, L — a lesson's index line."""
+    def text(rel_path: str) -> str:
+        p = root / rel_path
+        return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
+    tasks = sorted(p for p in (root / "tasks").glob("*.md") if p.name.lower() != "readme.md") if (root / "tasks").is_dir() else []
+    d = set()
+    for p in tasks:
+        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            m = TASK_LINE_RE.match(line)
+            mid = TASK_ID_RE.match(m.group(2).strip()) if m else None
+            if mid:
+                d.add(mid.group(1))
+    return {"D": d, "P": set(PROPOSAL_LINE_RE.findall(text("memory/PROPOSALS.md"))),
+            "L": set(LESSON_LINE_RE.findall(text(LESSONS_INDEX)))}
+
+
+def memory_sources(root: Path, extract) -> tuple[list[tuple[str, str, str | None]], list[str]]:
+    """(where, text, the file whose brief cap holds it — None for the lessons index), and a file whose block is gone."""
+    out, bad = [], []
+    lessons = root / LESSONS_INDEX
+    if lessons.is_file():
+        out.append((LESSONS_INDEX, lessons.read_text(encoding="utf-8", errors="replace"), None))
+    for name, block in MEMORY_BLOCKS:
+        p = root / name
+        if not p.is_file():
+            continue
+        text = p.read_text(encoding="utf-8", errors="replace")
+        if f"<!-- auto: {block}:start -->" not in text or f"<!-- auto: {block}:end -->" not in text:
+            bad.append(f"{name}: no `{block}` block (`<!-- auto: {block}:start -->` … `:end -->`) — the start brief shows "
+                       "it empty and its claims go unchecked: put the markers back")
+            continue
+        out.append((f"{name} ({block})", extract(text, block), name))
+    return out, bad
+
+
+def gate_memory(root: Path, files: list[Path], repo: Path | None = None, **_) -> Result:
+    limits = brief_limits()
+    if isinstance(limits, str):
+        return Result("memory", "INCONCLUSIVE", f"the start brief's limits could not be read from "
+                      f"{rel(HERE.parents[1], EPISODIC)} ({limits}) — nothing was checked")
+    caps, working_lines, extract = limits
+    sources, bad = memory_sources(root, extract)
+    if not sources and not bad:
+        return Result("memory", "INCONCLUSIVE", f"none of {LESSONS_INDEX}, {', '.join(n for n, _ in MEMORY_BLOCKS)} — the "
+                      "top layer every session trusts was not found, nothing was checked")
+    registers, (groups, groups_from) = memory_registers(root), drill_groups(root)
+    git_repo, at_commit = repo or root, repo is not None and repo != root
+    top = {p.name for p in root.iterdir()}
+    unknown: list[str] = []
+    counts = {"commit": 0, "number": 0, "path": 0, "group": 0}
+    is_repo: bool | None = None
+    for where, text, capped in sources:
+        for sha in sorted(set(MEMORY_SHA_RE.findall(text))):
+            counts["commit"] += 1
+            ok = commit_exists(git_repo, sha)
+            if ok:
+                continue
+            if is_repo is None:
+                is_repo = git_answers(git_repo, "rev-parse", "--git-dir")[0] == 0
+            if ok is None or not is_repo:
+                unknown.append(f"{where}: commit {sha} could not be checked — git has no repository at {git_repo}")
+            elif git_answers(git_repo, "rev-parse", "--is-shallow-repository")[1] == "true":
+                unknown.append(f"{where}: commit {sha} is not in this shallow clone — it may be older than the history "
+                               "the clone holds")
+            else:
+                bad.append(f"{where}: commit {sha} does not exist in this repository — correct the claim; another "
+                           "repository's commit is written with its name in front (`kit:<sha>`)")
+        for num in sorted(set(MEMORY_ID_RE.findall(text))):
+            counts["number"] += 1
+            if num not in registers[num[0]]:
+                bad.append(f"{where}: {num} is in no register — {REGISTERS[num[0]]} holds no line for it (a done task "
+                           "older than 14 days is deleted): drop the number or name what replaced it")
+        for token in sorted({t.strip() for t in MEMORY_TICK_RE.findall(text)}):
+            if not path_claim(token, top):
+                continue
+            counts["path"] += 1
+            # at commit, git's own folder and a file git ignores never reach the commit: for them the disk is all there is
+            found = path_status(root, git_repo, token, at_commit)
+            if found:
+                continue
+            if found is None:
+                unknown.append(f"{where}: git could not tell whether `{token}` is a file it ignores")
+                continue
+            bad.append(f"{where}: `{token}` does not exist{' in this commit' if at_commit else ''} — correct the path "
+                       "or drop the claim")
+        for inner in GUARDED_RE.findall(text):
+            for name in GROUP_NAME_RE.findall(inner):
+                counts["group"] += 1
+                if groups is None:
+                    unknown.append(f"{where}: drill group `{name}` could not be checked — no GROUPS list in {groups_from}")
+                elif name not in groups:
+                    bad.append(f"{where}: drill group `{name}` does not exist ({groups_from}: {', '.join(sorted(groups))}) "
+                               "— name the group that runs the case, or say `none`")
+        if capped is not None:
+            n_lines = len(text.splitlines())
+            if n_lines > working_lines:
+                bad.append(f"{where}: {n_lines} lines — the start brief shows {working_lines}, the rest would be cut")
+            if capped in caps and len(text) > caps[capped]:
+                bad.append(f"{where}: {len(text):,} characters, its cap is {caps[capped]:,} — the next session's brief "
+                           "would cut it: keep the block short, the story goes to the log below it")
+    status = "FAIL" if bad else "INCONCLUSIVE" if unknown else "PASS"
+    names = ", ".join(w for w, _, _ in sources) or "(none)"
+    summary = (f"{sum(counts.values())} claim(s) checked — {counts['commit']} commit(s), {counts['number']} number(s), "
+               f"{counts['path']} path(s), {counts['group']} drill group(s); blocks within the brief's caps"
+               f"{'' if not bad else ' unless named below'}  [input: {names}; drill groups: {groups_from}]")
+    return Result("memory", status, summary, bad + unknown)
+
+
 BUILTINS = {"graph": gate_graph, "json": gate_json, "toml": gate_toml, "python": gate_python,
             "shell": gate_shell, "eol": gate_eol, "secrets": gate_secrets, "instructions": gate_instructions,
-            "tasks": gate_tasks, "drill": gate_drill, "budget": gate_budget}
+            "tasks": gate_tasks, "drill": gate_drill, "budget": gate_budget, "memory": gate_memory}
 
 
 def venv_python(root: Path) -> Path:
@@ -677,13 +834,14 @@ def committed_drill(root: Path, gates: list[dict]) -> list[dict]:
 
 # At commit these read the next commit's tree (export_index); the secrets gate reads the staged files itself, and the
 # drill and the `cmd` gates run the working copy's code (changed_after_add).
-STAGED_READERS = {"graph", "json", "toml", "python", "shell", "eol", "instructions", "tasks", "budget"}
+STAGED_READERS = {"graph", "json", "toml", "python", "shell", "eol", "instructions", "tasks", "budget", "memory"}
 STAGED_INPUT = "staged files (git index)"
 
 
 def reads_text(name: str) -> bool:
     p = Path(name)
-    return p.suffix.lower() in TEXT_SUFFIXES or p.name in TEXT_NAMES or p.parent.name == ".githooks"
+    suffix = p.suffix.lower()
+    return suffix in TEXT_SUFFIXES or suffix in CODE_TEXT_SUFFIXES or p.name in TEXT_NAMES or p.parent.name == ".githooks"
 
 
 def export_index(root: Path) -> tuple[Path | None, list[Path], str]:
@@ -781,7 +939,7 @@ def run(root: Path, gates: list[dict], files: list[Path] | None, pre_commit: boo
                     res = run_cmd_gate(root, g)
             except Exception as e:
                 res = Result(g["id"], "INCONCLUSIVE", f"gate crashed: {type(e).__name__}: {e}")
-            named = label == STAGED_INPUT or builtin not in ("graph", "drill", "tasks", "budget", None)
+            named = label == STAGED_INPUT or builtin not in ("graph", "drill", "tasks", "budget", "memory", None)
             res.summary += f"  [input: {label}]" if named else ""
             results.append(res)
     finally:
@@ -808,15 +966,18 @@ def main(argv: list[str] | None = None) -> int:
     if a.pre_commit and not a.files:  # the drill gate the commit records
         gates = every = committed_drill(root, every)
     drills = [g for g in every if drill_floor.is_drill(g)]
+    known = sorted({str(g.get("id")) for g in every})  # read here: a doubled drill gate is taken out of the list below
     several = None
     if len(drills) > 1:  # one gate holds the drill's floor: a second one hid the last commit's
         ids = ", ".join(str(g.get("id")) for g in drills)
         several = Result("drill", "FAIL", f"DRILLS: {gates_file().name} has {len(drills)} drill gates ({ids}) — one "
                          "gate holds the drill's floor and a second one hides it: keep one")
         gates = every = [g for g in every if not drill_floor.is_drill(g)]
-    want = set(a.only.split(",")) if a.only else set()
-    if a.only:
-        gates = [g for g in gates if g["id"] in want]
+    # names are read as drill.py reads its own --only: split on commas, spaces around a name dropped
+    want = {name.strip() for name in a.only.split(",") if name.strip()} if a.only else set()
+    unknown = sorted(want.difference(known))
+    if a.only:  # the id is read the way `known` reads it, so a name is never both "unknown" and run
+        gates = [g for g in gates if str(g.get("id")) in want]
     elif a.files:
         gates = [g for g in gates if g.get("stop") or not g.get("enabled")]
     elif a.pre_commit:
@@ -825,6 +986,10 @@ def main(argv: list[str] | None = None) -> int:
     if files is not None:
         files = [f.resolve() for f in files if f.exists()]
     results = run(root, gates, files, a.pre_commit)
+    # A name no gate has checked nothing. It used to drop out without a word while the gates named next to it passed
+    # (`--only json,jsno` → GATES PASS, exit 0): now it is its own INCONCLUSIVE line.
+    results += [Result(name, "INCONCLUSIVE", f"ONLY-UNKNOWN: --only names a gate {gates_file().name} does not have — "
+                       f"nothing was checked under this name (gates: {', '.join(known)})") for name in unknown]
     if several:
         results.append(several)
     elif not a.files and (not want or "drill" in want):  # a run that holds the drill (ADR-0015)
